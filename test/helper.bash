@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # bats 共通セットアップ
+bats_require_minimum_version 1.5.0
+
 PFWD_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export PFWD_ROOT
 FIXTURES="${PFWD_ROOT}/test/fixtures"

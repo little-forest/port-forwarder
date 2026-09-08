@@ -898,6 +898,184 @@ PFWD_CONFIG_TEMPLATE
 #}}}
 
 #-------------------------------------------------------------------------------
+#- state functions -------------------------------------------------------------
+#{{{
+# state ファイルに書き出すキー (DESIGN 4.4)
+_STATE_KEYS=(status pid ctl since connected_since retry_count backoff \
+             next_retry_at next_check_at conn_sig last_error)
+
+# 実行時ディレクトリを決定する (DESIGN 3.3)
+_setup_runtime_dir() { #{{{
+  if (( EUID == 0 )) && [[ "$_CONFIG_FILE" == '/etc/port-forwarder/'* ]]; then
+    if [[ "$(uname)" == 'Darwin' ]]; then
+      _RUN_DIR='/usr/local/var/run/port-forwarder'
+    else
+      _RUN_DIR='/run/port-forwarder'
+    fi
+  elif [[ -n "$XDG_RUNTIME_DIR" ]]; then
+    _RUN_DIR="${XDG_RUNTIME_DIR}/port-forwarder"
+  else
+    _RUN_DIR="${HOME}/.local/state/port-forwarder/run"
+  fi
+  _state_init
+}
+#}}}
+
+# 実行時ディレクトリを作成する (パーミッションは umask 077 に従う)
+_state_init() { #{{{
+  local D
+  for D in "$_RUN_DIR" "${_RUN_DIR}/state" "${_RUN_DIR}/ctl" "${_RUN_DIR}/err"; do
+    [[ -d "$D" ]] && continue
+    mkdir -p "$D" 2>/dev/null || _error_exit "$_EXIT_ERROR" "cannot create runtime directory: ${D}"
+  done
+  chmod 700 "$_RUN_DIR" 2>/dev/null
+  return 0
+}
+#}}}
+
+# state ファイルを読み込む。無ければ既定値で初期化する
+_state_load() { #{{{
+  local NAME=$1 F K V
+  F="${_RUN_DIR}/state/${NAME}.state"
+  _ST[${NAME}.status]=stopped
+  _ST[${NAME}.pid]=0
+  _ST[${NAME}.ctl]=
+  _ST[${NAME}.since]=0
+  _ST[${NAME}.connected_since]=0
+  _ST[${NAME}.retry_count]=0
+  _ST[${NAME}.backoff]=0
+  _ST[${NAME}.next_retry_at]=0
+  _ST[${NAME}.next_check_at]=0
+  _ST[${NAME}.conn_sig]=
+  _ST[${NAME}.last_error]=
+  [[ -f "$F" ]] || return 1
+  # state ファイルは source せず自前でパースする (DESIGN 9)
+  while IFS='=' read -r K V; do
+    [[ -z "$K" ]] && continue
+    _in_array "$K" "${_STATE_KEYS[@]}" || continue
+    _ST[${NAME}.${K}]=$V
+  done < "$F"
+  return 0
+}
+#}}}
+
+_state_load_all() { #{{{
+  local NAME
+  for NAME in "${_CFG_NAMES[@]}"; do
+    _state_load "$NAME"
+  done
+  return 0
+}
+#}}}
+
+# _ST の内容を state ファイルへアトミックに書き出す (デーモンのみが呼ぶ)
+_state_flush() { #{{{
+  local NAME=$1 F TMP K
+  F="${_RUN_DIR}/state/${NAME}.state"
+  TMP="${_RUN_DIR}/err/${NAME}.state.tmp"
+  {
+    for K in "${_STATE_KEYS[@]}"; do
+      printf '%s=%s\n' "$K" "${_ST[${NAME}.${K}]}"
+    done
+  } > "$TMP" 2>/dev/null || return 1
+  mv -f "$TMP" "$F" 2>/dev/null || return 1
+  unset "_ST_DIRTY[$NAME]"
+  return 0
+}
+#}}}
+
+# 変更のあったエントリだけを書き出す
+_state_flush_dirty() { #{{{
+  local NAME
+  for NAME in "${!_ST_DIRTY[@]}"; do
+    _state_flush "$NAME"
+  done
+  return 0
+}
+#}}}
+
+_state_set() { #{{{
+  local NAME=$1 KEY=$2 VAL=$3
+  _ST[${NAME}.${KEY}]=$VAL
+  _ST_DIRTY[$NAME]=1
+  return 0
+}
+#}}}
+
+_state_get() { #{{{
+  printf '%s\n' "${_ST[${1}.${2}]}"
+}
+#}}}
+
+# 状態遷移はすべてこの関数を通す (ログの一貫性のため / DESIGN 5.4)
+_state_transit() { #{{{
+  local NAME=$1 NEW=$2 REASON=$3 OLD
+  OLD=${_ST[${NAME}.status]}
+  _ST[${NAME}.status]=$NEW
+  _ST[${NAME}.since]=$(_now)
+  _ST_DIRTY[$NAME]=1
+  [[ "$OLD" == "$NEW" ]] && return 0
+  if [[ -n "$REASON" ]]; then
+    _log_info "$NAME" "state: ${OLD} -> ${NEW} (${REASON})"
+  else
+    _log_info "$NAME" "state: ${OLD} -> ${NEW}"
+  fi
+  return 0
+}
+#}}}
+
+# エントリ削除時に state / desired / err を削除する
+_state_remove() { #{{{
+  local NAME=$1 K
+  rm -f "${_RUN_DIR}/state/${NAME}.state" \
+        "${_RUN_DIR}/state/${NAME}.desired" \
+        "${_RUN_DIR}/err/${NAME}.err" 2>/dev/null
+  for K in "${!_ST[@]}"; do
+    [[ "$K" == "${NAME}."* ]] && unset "_ST[$K]"
+  done
+  unset "_ST_DIRTY[$NAME]"
+  return 0
+}
+#}}}
+
+# 希望状態を書く (書き手は CLI のみ / DESIGN 4.5)
+_desired_set() { #{{{
+  local NAME=$1 VAL=$2 F TMP
+  F="${_RUN_DIR}/state/${NAME}.desired"
+  TMP="${_RUN_DIR}/err/${NAME}.desired.tmp"
+  printf '%s\n' "$VAL" > "$TMP" 2>/dev/null || return 1
+  mv -f "$TMP" "$F" 2>/dev/null || return 1
+  return 0
+}
+#}}}
+
+# 希望状態を読む。ファイルが無ければ enabled を初期値とする
+_desired_get() { #{{{
+  local NAME=$1 F V
+  F="${_RUN_DIR}/state/${NAME}.desired"
+  if [[ -f "$F" ]]; then
+    read -r V < "$F"
+    case "$V" in
+      up|down) printf '%s\n' "$V"; return 0 ;;
+    esac
+  fi
+  if [[ "${_CFG[${NAME}.enabled]}" == 'false' ]]; then
+    printf 'down\n'
+  else
+    printf 'up\n'
+  fi
+  return 0
+}
+#}}}
+
+_desired_remove() { #{{{
+  rm -f "${_RUN_DIR}/state/${1}.desired" 2>/dev/null
+  return 0
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
 #- usage / help ----------------------------------------------------------------
 #{{{
 _show_usage() { #{{{
