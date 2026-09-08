@@ -66,7 +66,7 @@ free_port() {
   local P I
   for (( I = 0; I < 100; I++ )); do
     P=$(( 20000 + RANDOM % 10000 ))
-    if ! (exec 3<>"/dev/tcp/127.0.0.1/${P}") 2>/dev/null; then
+    if ! { exec 3<>"/dev/tcp/127.0.0.1/${P}"; } 2>/dev/null; then
       printf '%s\n' "$P"
       return 0
     fi
@@ -98,7 +98,7 @@ while True:
 ' "$PORT" "$MODE" >/dev/null 2>&1 &
   PID=$!
   for (( I = 0; I < 50; I++ )); do
-    if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+    if { exec 3<>"/dev/tcp/127.0.0.1/${PORT}"; } 2>/dev/null; then
       printf '%s\n' "$PID"
       return 0
     fi

@@ -85,6 +85,7 @@ _SSH_ARGS=()
 _ENTRY_OPTS=()
 
 # デーモン制御フラグ (DESIGN 5.7)
+_DAEMON_STARTED=0
 _SHUTDOWN=
 _FLAG_HUP=0
 _FLAG_USR1=0
@@ -282,6 +283,9 @@ _truncate() { #{{{
 _sanitize() { #{{{
   local S=$*
   S=${S//[[:cntrl:]]/ }
+  # 前後の空白を落とす
+  S=${S#"${S%%[![:space:]]*}"}
+  S=${S%"${S##*[![:space:]]}"}
   (( ${#S} > 256 )) && S=${S:0:256}
   printf '%s\n' "$S"
 }
@@ -834,6 +838,19 @@ _config_check_perms() { #{{{
 }
 #}}}
 
+# 読み込み済みの設定を破棄する (reload 用)
+_config_reset() { #{{{
+  _CFG=()
+  _CFG_OPTS=()
+  _GLOBAL=()
+  _CFG_INVALID=()
+  _CFG_SOURCE=()
+  _CFG_NAMES=()
+  _CONFIG_FILES=()
+  return 0
+}
+#}}}
+
 # 設定の探索・読み込み・検証をまとめて行う
 _config_setup() { #{{{
   _config_find
@@ -1293,7 +1310,7 @@ _ssh_error_hint() { #{{{
 # 利用可能な TCP プローブ手段を判定する (DESIGN 5.6)
 _probe_detect() { #{{{
   local OUT
-  OUT=$( (exec 3<>'/dev/tcp/127.0.0.1/1') 2>&1 )
+  OUT=$( { exec 3<>'/dev/tcp/127.0.0.1/1'; } 2>&1 )
   if [[ "$OUT" != *'No such file or directory'* ]]; then
     _PROBE_BACKEND=devtcp
   elif command -v nc >/dev/null 2>&1; then
@@ -1314,7 +1331,9 @@ _probe_tcp() { #{{{
   [[ -z "$_PROBE_BACKEND" ]] && _probe_detect
   case "$_PROBE_BACKEND" in
     devtcp)
-      exec 3<>"/dev/tcp/${ADDR}/${PORT}" 2>/dev/null || return 1
+      # exec のリダイレクトエラーを握り潰すため、グループにまとめて 2> を掛ける
+      # (exec に直接 2>/dev/null を付けるとシェルの stderr 自体が差し替わる)
+      { exec 3<>"/dev/tcp/${ADDR}/${PORT}"; } 2>/dev/null || return 1
       exec 3<&- 3>&-
       return 0 ;;
     nc)
@@ -1330,7 +1349,7 @@ _probe_tcp() { #{{{
 # ローカルフォワードは転送先へのチャネルを開けないと接続を即座に閉じる。
 _probe_forward() { #{{{
   local ADDR=$1 PORT=$2 RC DUMMY
-  exec 3<>"/dev/tcp/${ADDR}/${PORT}" 2>/dev/null || return 2
+  { exec 3<>"/dev/tcp/${ADDR}/${PORT}"; } 2>/dev/null || return 2
   # 受信内容は使わない (到達判定のみ)
   # shellcheck disable=SC2034
   read -r -t "$_REMOTE_PROBE_WAIT" -N 1 -u 3 DUMMY
@@ -1385,6 +1404,397 @@ _health_check() { #{{{
       (( RC == 2 )) && return 0
       return 1 ;;
   esac
+  return 0
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- daemon functions ------------------------------------------------------------
+#{{{
+_DAEMON_RUNNING_PID=
+_CHECKS_THIS_TICK=0
+
+# ファイルの更新時刻を epoch 秒で返す
+_file_mtime() { #{{{
+  date -r "$1" '+%s' 2>/dev/null
+}
+#}}}
+
+# 死活監視で使うプローブ先アドレス (待ち受けが 0.0.0.0 でも 127.0.0.1 を叩く)
+_probe_addr() { #{{{
+  local A=${_CFG[${1}.bind_address]}
+  [[ "$A" == '0.0.0.0' || "$A" == '::' ]] && A=127.0.0.1
+  printf '%s\n' "$A"
+}
+#}}}
+
+# 起動中のデーモンの PID を返す (生きていなければ 1)
+_daemon_pid() { #{{{
+  local F="${_RUN_DIR}/daemon.pid" PID
+  [[ -f "$F" ]] || return 1
+  read -r PID < "$F" 2>/dev/null
+  [[ "$PID" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$PID" 2>/dev/null || return 1
+  printf '%s\n' "$PID"
+  return 0
+}
+#}}}
+
+# mkdir の原子性でロックを取る (flock は macOS に無いため使わない / DESIGN 5.8)
+_daemon_lock_acquire() { #{{{
+  local LOCK="${_RUN_DIR}/daemon.lock" PID
+  _DAEMON_RUNNING_PID=
+  if mkdir "$LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" > "${LOCK}/pid"
+    return 0
+  fi
+  PID=$(cat "${LOCK}/pid" 2>/dev/null)
+  if [[ "$PID" =~ ^[0-9]+$ ]] && kill -0 "$PID" 2>/dev/null; then
+    _DAEMON_RUNNING_PID=$PID
+    return 1
+  fi
+  _log_warn - "removing stale lock (pid=${PID:-unknown})"
+  rm -rf "$LOCK" 2>/dev/null
+  if mkdir "$LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" > "${LOCK}/pid"
+    return 0
+  fi
+  return 1
+}
+#}}}
+
+_daemon_lock_release() { #{{{
+  rm -rf "${_RUN_DIR}/daemon.lock" 2>/dev/null
+  return 0
+}
+#}}}
+
+# 採用した設定と起動時刻を記録する (reload 完了の通知も兼ねる)
+_daemon_write_meta() { #{{{
+  local F="${_RUN_DIR}/daemon.meta" TMP="${_RUN_DIR}/daemon.meta.tmp"
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'config=%s\n' "$_CONFIG_FILE"
+    printf 'started=%s\n' "$_DAEMON_STARTED"
+    printf 'updated=%s\n' "$(_now)"
+  } > "$TMP" 2>/dev/null || return 1
+  mv -f "$TMP" "$F" 2>/dev/null
+  return 0
+}
+#}}}
+
+# シグナルハンドラはフラグを立てるだけにする (DESIGN 5.7)
+_on_term() { _SHUTDOWN=1; }
+_on_hup()  { _FLAG_HUP=1; }
+_on_usr1() { _FLAG_USR1=1; }
+
+# state を読み直し、監視時刻を分散させる (DESIGN 5.7)
+_daemon_init_states() { #{{{
+  local NAME NOW I=0 INTERVAL
+  NOW=$(_now)
+  for NAME in "${_CFG_NAMES[@]}"; do
+    _state_load "$NAME"
+    INTERVAL=${_CFG[${NAME}.check_interval]}
+    [[ "$INTERVAL" =~ ^[0-9]+$ ]] || INTERVAL=$_MIN_CHECK_INTERVAL
+    if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+      _state_set "$NAME" pid 0
+      _state_set "$NAME" last_error "${_CFG_INVALID[$NAME]}"
+      _state_transit "$NAME" failed 'invalid configuration'
+    elif _ssh_is_alive "$NAME"; then
+      # 前回のデーモンが残したセッションを引き継ぐ
+      (( _ST[${NAME}.connected_since] == 0 )) && _state_set "$NAME" connected_since "$NOW"
+      _state_transit "$NAME" connected 'adopted an existing session'
+    else
+      _state_set "$NAME" pid 0
+      if [[ "${_CFG[${NAME}.enabled]}" == 'false' ]] \
+         && [[ ! -f "${_RUN_DIR}/state/${NAME}.desired" ]]; then
+        _state_transit "$NAME" disabled
+      else
+        _state_transit "$NAME" stopped
+      fi
+    fi
+    _state_set "$NAME" next_check_at $(( NOW + I % INTERVAL ))
+    I=$(( I + 1 ))
+  done
+  _state_flush_dirty
+  return 0
+}
+#}}}
+
+# 希望状態と現在の状態を突き合わせる (DESIGN 5.7)
+_daemon_reconcile() { #{{{
+  local NAME D S ADDR PORT
+  for NAME in "${_CFG_NAMES[@]}"; do
+    [[ -n "${_CFG_INVALID[$NAME]}" ]] && continue
+    D=$(_desired_get "$NAME")
+    S=${_ST[${NAME}.status]}
+    if [[ "$D" == 'up' ]]; then
+      case "$S" in
+        stopped|disabled|failed)
+          ADDR=$(_probe_addr "$NAME")
+          PORT=${_CFG[${NAME}.local_port]}
+          _state_set "$NAME" retry_count 0
+          _state_set "$NAME" backoff "${_GLOBAL[retry_initial]}"
+          _state_set "$NAME" next_retry_at 0
+          if ! _is_port_free "$ADDR" "$PORT"; then
+            _state_set "$NAME" last_error "$(_err_port_in_use "$NAME" "$PORT")"
+            _log_error "$NAME" "$(_err_port_in_use "$NAME" "$PORT")"
+            _state_transit "$NAME" failed 'local port already in use'
+          else
+            _ssh_start "$NAME"
+          fi ;;
+      esac
+    else
+      case "$S" in
+        connected|connecting|retrying)
+          _ssh_stop "$NAME"
+          _state_transit "$NAME" stopped ;;
+      esac
+    fi
+  done
+  return 0
+}
+#}}}
+
+# 再試行状態へ入る (指数バックオフ / SPECS 5.3)
+_enter_retrying() { #{{{
+  local NAME=$1 NOW=$2 RC BO
+  RC=$(( _ST[${NAME}.retry_count] + 1 ))
+  if (( RC == 1 )); then
+    BO=${_GLOBAL[retry_initial]}
+  else
+    BO=$(( _ST[${NAME}.backoff] * 2 ))
+    (( BO < _GLOBAL[retry_initial] )) && BO=${_GLOBAL[retry_initial]}
+    (( BO > _GLOBAL[retry_max] )) && BO=${_GLOBAL[retry_max]}
+  fi
+  _state_set "$NAME" retry_count "$RC"
+  _state_set "$NAME" backoff "$BO"
+  _state_set "$NAME" next_retry_at $(( NOW + BO ))
+  _state_transit "$NAME" retrying
+  _log_info "$NAME" "reconnecting in ${BO}s (attempt ${RC})"
+  return 0
+}
+#}}}
+
+# 1 エントリ 1 サイクル分の状態遷移 (DESIGN 5.7 / SPECS 5.1)
+_daemon_tick_entry() { #{{{
+  local NAME=$1 NOW=$2 ST ADDR PORT MSG HINT CLASS RC INTERVAL
+  ST=${_ST[${NAME}.status]}
+  ADDR=$(_probe_addr "$NAME")
+  PORT=${_CFG[${NAME}.local_port]}
+  INTERVAL=${_CFG[${NAME}.check_interval]}
+
+  case "$ST" in
+    connected)
+      (( NOW < _ST[${NAME}.next_check_at] )) && return 0
+      (( _CHECKS_THIS_TICK >= _MAX_CHECKS_PER_TICK )) && return 0
+      _CHECKS_THIS_TICK=$(( _CHECKS_THIS_TICK + 1 ))
+      if _health_check "$NAME"; then
+        _state_set "$NAME" next_check_at $(( NOW + INTERVAL ))
+        # 60 秒以上継続したらバックオフをリセットする (SPECS 5.3)
+        if (( NOW - _ST[${NAME}.connected_since] >= 60 )) && (( _ST[${NAME}.retry_count] > 0 )); then
+          _state_set "$NAME" retry_count 0
+          _state_set "$NAME" backoff "${_GLOBAL[retry_initial]}"
+        fi
+      else
+        _log_warn "$NAME" "health check failed (${_CFG[${NAME}.check_mode]} ${ADDR}:${PORT})"
+        _state_set "$NAME" last_error "health check failed (${_CFG[${NAME}.check_mode]} ${ADDR}:${PORT})"
+        _ssh_stop "$NAME"
+        _enter_retrying "$NAME" "$NOW"
+      fi ;;
+
+    connecting)
+      if ! _ssh_is_alive "$NAME"; then
+        MSG=$(_ssh_take_error "$NAME")
+        [[ -z "$MSG" ]] && MSG='ssh exited unexpectedly'
+        _state_set "$NAME" pid 0
+        _state_set "$NAME" last_error "$MSG"
+        _log_error "$NAME" "ssh exited: ${MSG}"
+        HINT=$(_ssh_error_hint "$NAME" "$MSG")
+        [[ -n "$HINT" ]] && _log_error "$NAME" "$HINT"
+        CLASS=$(_ssh_classify_error "$MSG")
+        if [[ "$CLASS" == 'fatal' ]]; then
+          _state_transit "$NAME" failed "$MSG"
+        else
+          _enter_retrying "$NAME" "$NOW"
+        fi
+        return 0
+      fi
+      # 確立の判定は check_mode に関わらず tcp 相当で行う (DESIGN 5.6)
+      _probe_tcp "$ADDR" "$PORT"
+      RC=$?
+      if (( RC == 0 || RC == 2 )); then
+        _state_transit "$NAME" connected
+        _state_set "$NAME" connected_since "$NOW"
+        _state_set "$NAME" next_check_at $(( NOW + INTERVAL ))
+        _log_info "$NAME" "connection established (pid=${_ST[${NAME}.pid]})"
+      elif (( NOW - _ST[${NAME}.since] >= _GLOBAL[connect_timeout] + 2 )); then
+        _ssh_stop "$NAME"
+        _state_set "$NAME" last_error "connection did not become ready within ${_GLOBAL[connect_timeout]}s"
+        _log_warn "$NAME" "connection did not become ready within ${_GLOBAL[connect_timeout]}s"
+        _enter_retrying "$NAME" "$NOW"
+      fi ;;
+
+    retrying)
+      (( NOW < _ST[${NAME}.next_retry_at] )) && return 0
+      if (( _GLOBAL[retry_limit] > 0 && _ST[${NAME}.retry_count] >= _GLOBAL[retry_limit] )); then
+        _state_set "$NAME" last_error "retry limit (${_GLOBAL[retry_limit]}) reached"
+        _state_transit "$NAME" failed 'retry limit reached'
+        return 0
+      fi
+      # ローカルポートが他プロセスに使われている場合は再試行しない (SPECS 5.3)
+      if ! _is_port_free "$ADDR" "$PORT"; then
+        _state_set "$NAME" last_error "$(_err_port_in_use "$NAME" "$PORT")"
+        _log_error "$NAME" "$(_err_port_in_use "$NAME" "$PORT")"
+        _state_transit "$NAME" failed 'local port already in use'
+        return 0
+      fi
+      _ssh_start "$NAME" ;;
+
+    stopped|disabled|failed)
+      : ;;   # デーモンからは何もしない。desired の変更でのみ復帰する
+  esac
+  return 0
+}
+#}}}
+
+# 設定を読み直して差分を反映する (SPECS 5.5)
+_daemon_reload() { #{{{
+  local NAME SIG ADDED=0 REMOVED=0 RESTARTED=0 DISABLED=0
+  local -a OLD_NAMES=("${_CFG_NAMES[@]}")
+
+  _OPT_CONFIG=$_CONFIG_FILE
+  # 先にサブシェルで検証し、失敗したら旧設定を維持する (デーモンは落とさない)
+  if ! ( _NO_CFG_WARN=yes; _config_reset; _config_setup ) >/dev/null 2>&1; then
+    _log_error - 'config reload failed; keeping the previous configuration'
+    return 1
+  fi
+  _NO_CFG_WARN=yes
+  _config_reset
+  _config_setup
+  _NO_CFG_WARN=
+
+  for NAME in "${_CFG_NAMES[@]}"; do
+    if ! _in_array "$NAME" "${OLD_NAMES[@]}"; then
+      ADDED=$(( ADDED + 1 ))
+      _state_load "$NAME"
+      _state_set "$NAME" pid 0
+      if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+        _state_set "$NAME" last_error "${_CFG_INVALID[$NAME]}"
+        _state_transit "$NAME" failed 'invalid configuration'
+      elif [[ "${_CFG[${NAME}.enabled]}" == 'false' ]]; then
+        _state_transit "$NAME" disabled
+      else
+        _state_transit "$NAME" stopped
+      fi
+      continue
+    fi
+    if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+      _ssh_stop "$NAME"
+      _state_set "$NAME" last_error "${_CFG_INVALID[$NAME]}"
+      _state_transit "$NAME" failed 'invalid configuration'
+      continue
+    fi
+    if [[ "${_CFG[${NAME}.enabled]}" == 'false' ]]; then
+      if [[ "${_ST[${NAME}.status]}" != 'disabled' ]]; then
+        _ssh_stop "$NAME"
+        _desired_remove "$NAME"
+        _state_transit "$NAME" disabled 'disabled by config'
+        DISABLED=$(( DISABLED + 1 ))
+      fi
+      continue
+    fi
+    SIG=$(_conn_sig "$NAME")
+    if [[ "$SIG" != "${_ST[${NAME}.conn_sig]}" ]]; then
+      case "${_ST[${NAME}.status]}" in
+        connected|connecting|retrying)
+          _ssh_stop "$NAME"
+          _state_transit "$NAME" stopped 'connection parameters changed'
+          RESTARTED=$(( RESTARTED + 1 )) ;;
+      esac
+    fi
+  done
+
+  for NAME in "${OLD_NAMES[@]}"; do
+    _in_array "$NAME" "${_CFG_NAMES[@]}" && continue
+    _ssh_stop "$NAME"
+    _state_remove "$NAME"
+    REMOVED=$(( REMOVED + 1 ))
+  done
+
+  _log_init
+  _daemon_reconcile
+  _state_flush_dirty
+  _daemon_write_meta
+  _log_info - "config reloaded (added=${ADDED}, removed=${REMOVED}, restarted=${RESTARTED}, disabled=${DISABLED})"
+  return 0
+}
+#}}}
+
+# 全セッションを停止して終了する (SPECS 5.4)
+_daemon_shutdown() { #{{{
+  local NAME
+  _log_info - 'shutting down'
+  for NAME in "${_CFG_NAMES[@]}"; do
+    case "${_ST[${NAME}.status]}" in
+      connected|connecting|retrying)
+        _ssh_stop "$NAME"
+        _state_transit "$NAME" stopped ;;
+      *)
+        _ssh_stop "$NAME" ;;
+    esac
+  done
+  _state_flush_dirty
+  rm -f "${_RUN_DIR}/daemon.pid" "${_RUN_DIR}/daemon.meta" 2>/dev/null
+  _daemon_lock_release
+  _log_info - 'daemon stopped'
+  return 0
+}
+#}}}
+
+# デーモン本体 (DESIGN 5.7)
+_daemon_main() { #{{{
+  local NAME NOW
+  umask 077
+  if ! _daemon_lock_acquire; then
+    _error_exit "$_EXIT_RUNNING" "$(_err_daemon_running "$_DAEMON_RUNNING_PID")"
+  fi
+  _DAEMON_STARTED=$(_now)
+  printf '%s\n' "$$" > "${_RUN_DIR}/daemon.pid"
+  trap '_on_term' TERM INT
+  trap '_on_hup' HUP
+  trap '_on_usr1' USR1
+
+  _log_init
+  _probe_detect
+  _daemon_init_states
+  _daemon_reconcile
+  _state_flush_dirty
+  _daemon_write_meta
+  _log_info - "daemon started (pid=$$, entries=${#_CFG_NAMES[@]})"
+
+  while [[ -z "$_SHUTDOWN" ]]; do
+    if (( _FLAG_HUP )); then
+      _FLAG_HUP=0
+      _daemon_reload
+    fi
+    if (( _FLAG_USR1 )); then
+      _FLAG_USR1=0
+      _daemon_reconcile
+    fi
+    NOW=$(_now)
+    _CHECKS_THIS_TICK=0
+    for NAME in "${_CFG_NAMES[@]}"; do
+      _daemon_tick_entry "$NAME" "$NOW"
+    done
+    _state_flush_dirty
+    # 終了した ssh を回収する (ゾンビを kill -0 で生存と誤判定しないため)
+    jobs > /dev/null 2>&1
+    sleep 1
+  done
+
+  _daemon_shutdown
   return 0
 }
 #}}}
@@ -1667,6 +2077,11 @@ _cmd_config() { #{{{
 }
 #}}}
 
+_cmd_daemon() { #{{{
+  _daemon_main
+}
+#}}}
+
 _cmd_version() { #{{{
   printf '%s %s\n' "$__SCRIPT_NAME" "$_VERSION"
 }
@@ -1750,6 +2165,7 @@ _check_prerequisites() { #{{{
 # テスト (bats) では関数定義のみを読み込む
 [[ -n "$PFWD_SOURCE_ONLY" ]] && return 0
 
+umask 077
 __setup
 _parse_args "$@"
 
@@ -1781,6 +2197,11 @@ case "$_SUBCMD" in
     _check_prerequisites
     _config_setup
     _cmd_list ;;
+  daemon)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_daemon ;;
   *)
     _usage "unknown subcommand: ${_SUBCMD}" ;;
 esac
