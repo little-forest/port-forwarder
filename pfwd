@@ -1,0 +1,779 @@
+#!/usr/bin/env bash
+#===============================================================================
+# pfwd : persistent SSH port forwarding
+# Date    :  2026-09-08 Start
+# Copyright: Original code by Yusuke Komori.
+#                       Copyright (c) 2026. Yusuke Komori, All rights reserved.
+#===============================================================================
+# shellcheck disable=SC2006
+
+#- bash version check ----------------------------------------------------------
+# 連想配列を使うため bash 4.0 以上が必須 (DESIGN 1.1 / 7.2)。
+# 後続の declare -A より前に判定する必要があるため、関数化せずここで実行する。
+if [[ -z "${BASH_VERSINFO[0]}" ]] || (( BASH_VERSINFO[0] < 4 )); then
+  echo "[ ERROR ] bash 4.0 or later is required (current: ${BASH_VERSION:-unknown}). On macOS: brew install bash" >&2
+  exit 7
+fi
+
+#-------------------------------------------------------------------------------
+#- common global variables -----------------------------------------------------
+__SCRIPT_BASE=$(cd "$(dirname "$0")" || exit; pwd)
+__SCRIPT_NAME=$(basename "$0")
+
+__SILENT=
+
+#-------------------------------------------------------------------------------
+#- global variables ------------------------------------------------------------
+#{{{
+_VERSION='1.0.0'
+
+# 終了コード (SPECS 7 章)
+_EXIT_OK=0
+_EXIT_ERROR=1
+_EXIT_USAGE=2
+_EXIT_CONFIG=3
+_EXIT_CONNECT=4
+_EXIT_NO_DAEMON=5
+_EXIT_RUNNING=6
+_EXIT_DEPS=7
+
+# 内部定数 (DESIGN 1.2)
+_US=$'\x1f'                 # 配列要素の区切り (Unit Separator)
+_CHECK_TIMEOUT=3            # TCP プローブのタイムアウト(秒)
+_REMOTE_PROBE_WAIT=1.0      # remote プローブの待機時間(秒)
+_MAX_CHECKS_PER_TICK=20     # 1 サイクルあたりの死活監視実行数の上限
+_MIN_CHECK_INTERVAL=5       # check_interval の下限 (SPECS 4.3)
+_CTL_PATH_MAX=100           # ControlPath の長さ上限(バイト)
+
+# 共通オプション
+_OPT_CONFIG=
+_OPT_HELP=
+_OPT_VERSION=
+_VERBOSE=0
+_QUIET=
+_NO_COLOR=
+_NO_TTY=
+_SUBCMD=
+_SUBCMD_GIVEN=
+_ARGS=()
+_SUBCMD_OPTS=()
+
+# 設定 (DESIGN 4.1)
+_CONFIG_FILE=
+_CONFIG_FILES=()
+_CFG_NAMES=()
+declare -A _CFG=()
+declare -A _CFG_OPTS=()
+declare -A _GLOBAL=()
+declare -A _CFG_INVALID=()
+declare -A _CFG_SOURCE=()
+
+# 状態 (DESIGN 4.4)
+declare -A _ST=()
+declare -A _ST_DIRTY=()
+
+# 実行時
+_RUN_DIR=
+_LOG_FILE=
+_HAVE_PRINTF_TIME=
+_PROBE_BACKEND=
+_NAME_WIDTH=10
+_SSH_ARGS=()
+
+# デーモン制御フラグ (DESIGN 5.7)
+_SHUTDOWN=
+_FLAG_HUP=0
+_FLAG_USR1=0
+
+# 色 (__setup_color で eval により設定される)
+C_OFF=
+C_GREEN=
+C_YELLOW=
+C_RED=
+C_GREY=
+C_CYAN=
+#}}}
+
+#-------------------------------------------------------------------------------
+#- common functions ------------------------------------------------------------
+#{{{
+__setup() { #{{{
+  tty -s || _NO_TTY=yes
+}
+#}}}
+
+__setup_color() { #{{{
+  local I
+  local COLOR_MAP=(\
+    BLACK 0 MAROON 1 GREEN 2 OLIVE 3 NAVY 4 PURPLE 5 TEAL 6 SILVER 7 GREY 8 \
+    RED 9 LIME 10 YELLOW 11 BLUE 12 FUCHSIA 13 AQUA 14 WHITE 15 \
+    MAGENTA 5 CYAN 6 PINK 218 ORANGE 214 DARK_ORANGE3 166 \
+  )
+
+  C_OFF=`tput sgr0`   # Reset attribute
+  # shellcheck disable=SC2034
+  C_BOLD=`tput bold`  # Bold mode
+  # shellcheck disable=SC2034
+  C_REV=`tput rev`    # Reverse mode
+  # shellcheck disable=SC2034
+  C_UL=`tput smul`    # Underline mode
+
+  for ((I=0; I<${#COLOR_MAP[@]}; I+=2)); do
+    eval "C_${COLOR_MAP[$I]}=\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
+    eval "C_B_${COLOR_MAP[$I]}=\`tput bold\`\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
+    eval "C_U_${COLOR_MAP[$I]}=\`tput smul\`\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
+    eval "C_R_${COLOR_MAP[$I]}=\`tput bold\`\`tput rev\`\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
+  done
+}
+#}}}
+
+__script_end() { #{{{
+  local FUNC
+  while read -r FUNC; do
+    $FUNC
+  done < <(declare -F | sed -e 's/^declare -f //' | grep -E '^__?script_end_.+' | sort)
+}
+trap '__script_end' EXIT
+#}}}
+
+__show_info() { #{{{
+  [[ -n "${__SILENT}" ]] && return
+  [[ "$1" == "-n" ]] && echo -en "${C_CYAN}${2}${C_OFF}" || echo -e "${C_CYAN}${1}${C_OFF}"
+}
+#}}}
+
+__show_error() { #{{{
+  echo -e "[${C_RED} ERROR ${C_OFF}] $*" >&2
+}
+#}}}
+
+__show_warn() { #{{{
+  [[ -n "${__SILENT}" ]] && return
+  echo -e "[${C_YELLOW} WARN ${C_OFF}] $*" >&2
+}
+#}}}
+
+__error_end() { #{{{
+  __show_error "$*"; exit 1
+}
+#}}}
+
+__get_tmp_base() { #{{{
+  local TMP_BASE RAMDISK
+  if [[ `uname` != Darwin ]]; then
+    RAMDISK='/dev/shm'
+  else
+    RAMDISK='/Volumes/Ramdisk'
+  fi
+  [[ -d ${RAMDISK} ]] && TMP_BASE=${RAMDISK}/ || TMP_BASE=${TMPDIR:-/tmp}/
+  TMP_BASE="${TMP_BASE}tmp.`basename "$0"`.$$"
+  [[ ! -d "$TMP_BASE" ]] && mkdir "$TMP_BASE"
+  echo "$TMP_BASE"
+}
+#}}}
+
+__make_tmp() { #{{{
+  local TMP_BASE
+  TMP_BASE=`__get_tmp_base`
+  local OPT=()
+  [[ "$1" == '-d' ]] && OPT+=("$1")
+  OPT+=('-p' "$TMP_BASE")
+  mktemp "${OPT[@]}"
+}
+#}}}
+
+__script_end_clean_tmp() { #{{{
+  local TMP_BASE
+  TMP_BASE="${TMPDIR:-/tmp}/tmp.`basename "$0"`.$$"
+  [[ -d /dev/shm ]] && TMP_BASE="/dev/shm/tmp.`basename "$0"`.$$"
+  [[ -d /Volumes/Ramdisk ]] && TMP_BASE="/Volumes/Ramdisk/tmp.`basename "$0"`.$$"
+  [[ -d "$TMP_BASE" ]] && rm -rf "${TMP_BASE}"
+  return 0
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- utility functions -----------------------------------------------------------
+#{{{
+# 現在時刻を epoch 秒で返す
+_now() { #{{{
+  if [[ -z "$_HAVE_PRINTF_TIME" ]]; then
+    if printf '%(%s)T' -1 >/dev/null 2>&1; then _HAVE_PRINTF_TIME=yes; else _HAVE_PRINTF_TIME=no; fi
+  fi
+  if [[ "$_HAVE_PRINTF_TIME" == yes ]]; then
+    printf '%(%s)T\n' -1
+  else
+    date +%s
+  fi
+}
+#}}}
+
+# ログ用のタイムスタンプ (SPECS 6.5)
+_timestamp() { #{{{
+  if [[ -z "$_HAVE_PRINTF_TIME" ]]; then
+    if printf '%(%s)T' -1 >/dev/null 2>&1; then _HAVE_PRINTF_TIME=yes; else _HAVE_PRINTF_TIME=no; fi
+  fi
+  if [[ "$_HAVE_PRINTF_TIME" == yes ]]; then
+    printf '%(%Y-%m-%dT%H:%M:%S%z)T\n' -1
+  else
+    date +%Y-%m-%dT%H:%M:%S%z
+  fi
+}
+#}}}
+
+# 経過秒数を "2d 04:11" / "05:22" 形式に整形する (SPECS 6.1)
+_fmt_uptime() { #{{{
+  local SEC=$1 D H M
+  [[ ! "$SEC" =~ ^[0-9]+$ ]] && { printf '%s\n' '-'; return; }
+  D=$(( SEC / 86400 ))
+  H=$(( SEC % 86400 / 3600 ))
+  M=$(( SEC % 3600 / 60 ))
+  if (( D > 0 )); then
+    printf '%dd %02d:%02d\n' "$D" "$H" "$M"
+  else
+    printf '%02d:%02d\n' "$H" "$M"
+  fi
+}
+#}}}
+
+# 先頭の ~ を $HOME に展開する
+_expand_tilde() { #{{{
+  local P=$1
+  if [[ "${P:0:1}" == '~' ]]; then
+    if (( ${#P} == 1 )); then
+      P=$HOME
+    elif [[ "${P:1:1}" == '/' ]]; then
+      P="${HOME}${P:1}"
+    fi
+  fi
+  printf '%s\n' "$P"
+}
+#}}}
+
+# 配列に値が含まれるか
+_in_array() { #{{{
+  local NEEDLE=$1 V
+  shift
+  for V in "$@"; do
+    [[ "$V" == "$NEEDLE" ]] && return 0
+  done
+  return 1
+}
+#}}}
+
+# 幅を超える文字列を末尾 ... で切り詰める (SPECS 6.2)
+_truncate() { #{{{
+  local S=$1 W=$2
+  if (( ${#S} > W )); then
+    printf '%s...\n' "${S:0:$(( W - 3 ))}"
+  else
+    printf '%s\n' "$S"
+  fi
+}
+#}}}
+
+# 制御文字を空白に置換し、256 バイトで打ち切る (DESIGN 9)
+_sanitize() { #{{{
+  local S=$*
+  S=${S//[[:cntrl:]]/ }
+  (( ${#S} > 256 )) && S=${S:0:256}
+  printf '%s\n' "$S"
+}
+#}}}
+
+# 誤入力に最も近いエントリ名を返す (距離 3 以下)
+_suggest_name() { #{{{
+  local TARGET=$1
+  (( ${#_CFG_NAMES[@]} == 0 )) && return 0
+  printf '%s\n' "${_CFG_NAMES[@]}" | awk -v t="$TARGET" '
+    function lev(s, u,   m, n, i, j, cost, x, y, z, d) {
+      m = length(s); n = length(u)
+      for (i = 0; i <= m; i++) d[i, 0] = i
+      for (j = 0; j <= n; j++) d[0, j] = j
+      for (i = 1; i <= m; i++) {
+        for (j = 1; j <= n; j++) {
+          cost = (substr(s, i, 1) == substr(u, j, 1)) ? 0 : 1
+          x = d[i-1, j] + 1; y = d[i, j-1] + 1; z = d[i-1, j-1] + cost
+          d[i, j] = (x < y) ? x : y
+          if (z < d[i, j]) d[i, j] = z
+        }
+      }
+      return d[m, n]
+    }
+    { c = lev(t, $0); if (best == "" || c < bd) { bd = c; best = $0 } }
+    END { if (best != "" && bd <= 3) print best }'
+  return 0
+}
+#}}}
+
+# 終了コードを伴うエラー終了 (DESIGN 7.1)
+_error_exit() { #{{{
+  local CODE=$1
+  shift
+  __show_error "$*"
+  exit "$CODE"
+}
+#}}}
+
+# 実行結果を 1 行で表示する (DESIGN 2.3)
+_show_result() { #{{{
+  local RESULT=$1 NAME=$2
+  shift 2
+  [[ -n "$_QUIET" ]] && return 0
+  local TAG COLOR
+  case "$RESULT" in
+    OK)     TAG='  OK  '; COLOR=$C_GREEN ;;
+    FAILED) TAG='FAILED'; COLOR=$C_RED ;;
+    WARN)   TAG=' WARN '; COLOR=$C_YELLOW ;;
+    SKIP)   TAG=' SKIP '; COLOR=$C_GREY ;;
+    *)      TAG=$RESULT;  COLOR= ;;
+  esac
+  printf '[%s%s%s] %-*s %s\n' "$COLOR" "$TAG" "$C_OFF" "$_NAME_WIDTH" "$NAME" "$*"
+}
+#}}}
+
+# 対象エントリ名の最大長から表示幅を決める
+_calc_name_width() { #{{{
+  local N W=10
+  for N in "$@"; do
+    (( ${#N} > W )) && W=${#N}
+  done
+  _NAME_WIDTH=$W
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- logging functions -----------------------------------------------------------
+#{{{
+# ログ出力先を決定する。書き込めない場合は標準出力にフォールバックする
+_log_init() { #{{{
+  local F D
+  F=${_GLOBAL[log_file]}
+  if [[ -z "$F" ]]; then
+    _LOG_FILE=
+    return 0
+  fi
+  F=$(_expand_tilde "$F")
+  D=$(dirname "$F")
+  if [[ ! -d "$D" ]] && ! mkdir -p "$D" 2>/dev/null; then
+    __show_warn "cannot create log directory: ${D} (logging to stdout)"
+    _LOG_FILE=
+    return 1
+  fi
+  if ! : >> "$F" 2>/dev/null; then
+    __show_warn "cannot write log file: ${F} (logging to stdout)"
+    _LOG_FILE=
+    return 1
+  fi
+  _LOG_FILE=$F
+  return 0
+}
+#}}}
+
+# _log <LEVEL> <ENTRY|-> <MSG...>
+_log() { #{{{
+  local LEVEL=$1 ENTRY=$2
+  shift 2
+  local MSG LINE
+  MSG=$(_sanitize "$*")
+  if [[ "$ENTRY" == '-' ]]; then
+    printf -v LINE '%s [%-5s] %s' "$(_timestamp)" "$LEVEL" "$MSG"
+  else
+    printf -v LINE '%s [%-5s] [%s] %s' "$(_timestamp)" "$LEVEL" "$ENTRY" "$MSG"
+  fi
+  if [[ -n "$_LOG_FILE" ]]; then
+    printf '%s\n' "$LINE" >> "$_LOG_FILE"
+  else
+    printf '%s\n' "$LINE"
+  fi
+  return 0
+}
+#}}}
+
+_log_info()  { _log 'INFO'  "$@"; }
+_log_warn()  { _log 'WARN'  "$@"; }
+_log_error() { _log 'ERROR' "$@"; }
+
+# -v / -vv 指定時のみ標準エラー出力に出す (SPECS 3.2)
+_debug() { #{{{
+  (( _VERBOSE >= 1 )) || return 0
+  printf '%s [DEBUG] %s\n' "$(_timestamp)" "$(_sanitize "$*")" >&2
+  return 0
+}
+#}}}
+
+_debug2() { #{{{
+  (( _VERBOSE >= 2 )) || return 0
+  printf '%s [DEBUG] %s\n' "$(_timestamp)" "$(_sanitize "$*")" >&2
+  return 0
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- error message functions -----------------------------------------------------
+#{{{
+# SPECS 10 章のメッセージをここに集約する (DESIGN 7.3)
+_err_no_config()       { echo "config file not found. Run '${__SCRIPT_NAME} config --init' to create one at $1"; }
+_err_parse_failed()    { echo "failed to parse $1: $2"; }
+_err_no_entries()      { echo "$1 has no valid entries. 'entries' must be a non-empty map."; }
+_err_missing_key()     { echo "[$1] missing required key '$2' (entries.$1.$2)"; }
+_err_bad_port()        { echo "[$1] $2 must be an integer between 1 and 65535 (got '$3')"; }
+_err_dup_port()        { echo "local_port $1 is used by both [$2] and [$3]"; }
+_err_port_in_use()     { echo "[$1] local port $2 is already in use by another process"; }
+_err_unknown_host_key(){ echo "[$1] host key for $2 is not in known_hosts. Run: ssh-keyscan -H $2 >> ~/.ssh/known_hosts"; }
+_err_key_perm()        { echo "[$1] identity file $2 has too open permissions ($3). Run: chmod 600 $2"; }
+_err_no_identity()     { echo "[$1] identity file $2 does not exist"; }
+_err_no_command()      { echo "required command '$1' not found. Install it and make sure it is in your PATH."; }
+_err_daemon_running()  { echo "daemon is already running (pid $1). Use '${__SCRIPT_NAME} down' to stop it."; }
+_err_no_daemon()       { echo "daemon is not running. Run '${__SCRIPT_NAME} up' to start it."; }
+_err_no_entry()        { #{{{
+  local S
+  S=$(_suggest_name "$1")
+  if [[ -n "$S" ]]; then
+    echo "no such entry '$1'. Did you mean '$S'?"
+  else
+    echo "no such entry '$1'"
+  fi
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- usage / help ----------------------------------------------------------------
+#{{{
+_show_usage() { #{{{
+  cat <<PFWD_USAGE
+usage: ${__SCRIPT_NAME} <subcommand> [options] [entry...]
+
+Persistent SSH port forwarding manager.
+
+subcommands:
+  start [name...]      start forwarding for the given entries (default: enabled entries)
+  stop [name...]       stop forwarding for the given entries
+  restart [name...]    stop and start again
+  status [name...]     show connection status (default subcommand)
+  list                 list entries defined in the config file
+  daemon               run the monitoring daemon in the foreground
+  up                   start the daemon in the background
+  down                 stop the daemon and all sessions
+  reload               reload the config file and apply the difference
+  logs [name]          show logs (-f to follow)
+  test [name...]       validate the config and check connectivity
+  install-service      generate a systemd unit (Linux only)
+  uninstall-service    remove the systemd unit (Linux only)
+  config               show the config path, or create one with --init
+  version              show version
+  help [subcommand]    show help
+
+common options:
+  -c, --config <PATH>  use the specified config file
+  -v, --verbose        verbose output to stderr (-vv for more)
+  -q, --quiet          suppress everything but errors
+      --no-color       disable colored output
+  -h, --help           show help
+  -V, --version        show version
+
+Run '${__SCRIPT_NAME} help <subcommand>' for details.
+PFWD_USAGE
+}
+#}}}
+
+_usage() { #{{{
+  [[ -n "$1" ]] && __show_error "$1"
+  _show_usage >&2
+  exit "$_EXIT_USAGE"
+}
+#}}}
+
+_help_start() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} start [name...]
+
+Start forwarding for the given entries. With no name, all enabled entries are
+started. The daemon must be running (see '${__SCRIPT_NAME} up').
+
+Starting an entry that is already connected succeeds and reports [ SKIP ].
+PFWD_HELP
+}
+#}}}
+
+_help_stop() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} stop [name...]
+
+Stop forwarding for the given entries. With no name, all entries are stopped.
+The daemon keeps running; use '${__SCRIPT_NAME} down' to stop the daemon itself.
+PFWD_HELP
+}
+#}}}
+
+_help_restart() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} restart [name...]
+
+Stop and start the given entries again. This also resets the retry backoff,
+so it is the way to recover an entry in the 'failed' state.
+PFWD_HELP
+}
+#}}}
+
+_help_status() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} status [--exit-code] [name...]
+
+Show the connection status of each entry.
+
+options:
+  --exit-code   exit with 4 if any entry is not connected (for monitoring)
+PFWD_HELP
+}
+#}}}
+
+_help_list() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} list
+
+List the entries defined in the config file. Process state is not inspected.
+PFWD_HELP
+}
+#}}}
+
+_help_daemon() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} daemon
+
+Run the monitoring daemon in the foreground. Intended to be run from systemd.
+Use '${__SCRIPT_NAME} up' to start it in the background.
+PFWD_HELP
+}
+#}}}
+
+_help_up() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} up
+
+Start the monitoring daemon in the background and start all enabled entries.
+PFWD_HELP
+}
+#}}}
+
+_help_down() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} down
+
+Stop the daemon. All SSH sessions it manages are terminated as well.
+PFWD_HELP
+}
+#}}}
+
+_help_reload() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} reload
+
+Reload the config file and apply only the difference: added entries are
+started, removed entries are stopped, entries whose connection parameters
+changed are restarted, and the rest keep their sessions.
+PFWD_HELP
+}
+#}}}
+
+_help_logs() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} logs [-f] [name]
+
+Show the log file configured as global.log_file. With a name, only the lines
+of that entry are shown.
+
+options:
+  -f            follow the log (like tail -f)
+PFWD_HELP
+}
+#}}}
+
+_help_test() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} test [name...]
+
+Validate the configuration and check connectivity without establishing any
+forwarding. Exits with 4 if any entry fails.
+PFWD_HELP
+}
+#}}}
+
+_help_config() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} config [--init [--force]]
+
+With no option, show the path of the config file in use.
+
+options:
+  --init        create a template config file
+  --force       overwrite an existing file (with --init)
+PFWD_HELP
+}
+#}}}
+
+_help_install_service() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} install-service [--user|--system] [--run-as USER] [--now]
+
+Generate a systemd unit for the daemon (Linux only).
+
+options:
+  --user        generate a user unit (default)
+  --system      generate a system unit in /etc/systemd/system
+  --run-as USER run the system unit as the given user
+  --now         run daemon-reload and enable --now afterwards
+PFWD_HELP
+}
+#}}}
+
+_help_uninstall_service() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} uninstall-service [--user|--system]
+
+Stop, disable and remove the systemd unit generated by install-service.
+PFWD_HELP
+}
+#}}}
+
+_help_version() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} version
+
+Show the version of ${__SCRIPT_NAME}.
+PFWD_HELP
+}
+#}}}
+
+_help_help() { #{{{
+  cat <<PFWD_HELP
+usage: ${__SCRIPT_NAME} help [subcommand]
+
+Show general help, or the help of the given subcommand.
+PFWD_HELP
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- subcommand functions --------------------------------------------------------
+#{{{
+_cmd_version() { #{{{
+  printf '%s %s\n' "$__SCRIPT_NAME" "$_VERSION"
+}
+#}}}
+
+_cmd_help() { #{{{
+  local SUB=$1 FUNC
+  if [[ -z "$SUB" ]]; then
+    _show_usage
+    return 0
+  fi
+  FUNC="_help_${SUB//-/_}"
+  if declare -F "$FUNC" >/dev/null 2>&1; then
+    "$FUNC"
+  else
+    _usage "no such subcommand: ${SUB}"
+  fi
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- argument parsing ------------------------------------------------------------
+#{{{
+# template.sh の __LONG_OPT_NAMES 方式は --config <PATH> のような値付きオプションを
+# 扱えないため、統合パーサをここに実装する (DESIGN 5.9)。
+_parse_args() { #{{{
+  while (( $# > 0 )); do
+    case "$1" in
+      -c|--config)
+        [[ $# -lt 2 ]] && _usage "option requires an argument: $1"
+        _OPT_CONFIG=$2; shift 2 ;;
+      --config=*)   _OPT_CONFIG=${1#*=}; shift ;;
+      -v|--verbose) _VERBOSE=$(( _VERBOSE + 1 )); shift ;;
+      -vv)          _VERBOSE=2; shift ;;
+      -q|--quiet)   _QUIET=yes; shift ;;
+      --no-color)   _NO_COLOR=yes; shift ;;
+      -h|--help)    _OPT_HELP=yes; shift ;;
+      -V|--version) _OPT_VERSION=yes; shift ;;
+      --)           shift
+                    while (( $# > 0 )); do _ARGS+=("$1"); shift; done
+                    break ;;
+      # サブコマンド固有オプションは各 _cmd_* が解析する
+      --init|--force|--user|--system|--now|--exit-code|-f)
+                    _SUBCMD_OPTS+=("$1"); shift ;;
+      --run-as)
+        [[ $# -lt 2 ]] && _usage "option requires an argument: $1"
+        _SUBCMD_OPTS+=("$1" "$2"); shift 2 ;;
+      --run-as=*)   _SUBCMD_OPTS+=("$1"); shift ;;
+      -*)           _usage "unknown option: $1" ;;
+      *)
+        if [[ -z "$_SUBCMD" ]]; then
+          _SUBCMD=$1
+          _SUBCMD_GIVEN=yes
+        else
+          _ARGS+=("$1")
+        fi
+        shift ;;
+    esac
+  done
+  # SPECS 3.1: 引数なしは status
+  [[ -z "$_SUBCMD" ]] && _SUBCMD=status
+  return 0
+}
+#}}}
+
+# 依存コマンドの存在確認 (DESIGN 7.2)
+_check_prerequisites() { #{{{
+  local CMD
+  for CMD in ssh yq; do
+    command -v "$CMD" >/dev/null 2>&1 || _error_exit "$_EXIT_DEPS" "$(_err_no_command "$CMD")"
+  done
+  return 0
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- Main process ----------------------------------------------------------------
+#-------------------------------------------------------------------------------
+# テスト (bats) では関数定義のみを読み込む
+[[ -n "$PFWD_SOURCE_ONLY" ]] && return 0
+
+__setup
+_parse_args "$@"
+
+[[ -z "$_NO_COLOR" && -z "$_NO_TTY" ]] && __setup_color
+[[ -n "$_QUIET" ]] && __SILENT=yes
+
+if [[ -n "$_OPT_VERSION" ]]; then
+  _cmd_version
+  exit "$_EXIT_OK"
+fi
+
+if [[ -n "$_OPT_HELP" ]]; then
+  if [[ -n "$_SUBCMD_GIVEN" ]]; then
+    _cmd_help "$_SUBCMD"
+  else
+    _cmd_help ''
+  fi
+  exit "$_EXIT_OK"
+fi
+
+case "$_SUBCMD" in
+  version)
+    _cmd_version ;;
+  help)
+    _cmd_help "${_ARGS[0]}" ;;
+  *)
+    _usage "unknown subcommand: ${_SUBCMD}" ;;
+esac
+
+exit "$_EXIT_OK"
+
+# vim: ts=2 sw=2 sts=2 et nu foldmethod=marker
