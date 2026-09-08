@@ -53,7 +53,7 @@
 
 | コマンド | 用途 | 入手 |
 | --- | --- | --- |
-| `bash` (4.x 以上) | 実行環境 | Linux: 標準 / macOS: `brew install bash`（3.2 でも動作するよう配慮するが、推奨は 4.x 以上） |
+| `bash` (4.2 以上) | 実行環境 | Linux: 標準 / macOS: `brew install bash`（設定・状態の保持に連想配列と `declare -g` を使うため 4.2 未満では動作しない。起動時に判定し、満たさなければ終了コード 7 で終了する） |
 | `ssh` (OpenSSH 7.4+) | フォワーディング本体 | 両 OS 標準 |
 | `yq` (mikefarah/yq v4 系) | 設定ファイル（YAML）の解析 | 導入済みかつ PATH が通っていることを前提とする（導入手順は本設計のスコープ外） |
 | `nc` または `bash /dev/tcp` | ローカルポートの疎通確認 | 標準（`nc` が無い場合は `/dev/tcp` にフォールバック） |
@@ -178,6 +178,7 @@ entries:
 ```
 
 - 値の型は YAML に従う（ポート番号は数値、`enabled` は真偽値）。文字列としてクォートしても受け付ける。
+- `ExitOnForwardFailure=yes` は**常に既定で付与される**ため、上の `metrics` の例のように `ssh_options` へ明示する必要はない。`ssh_options` の指定は既定値の後に並ぶため、既定を上書きすることもできる。
 - パス値の先頭 `~` は実行ユーザーのホームディレクトリに展開する。
 - エントリ表示順は YAML の記述順を維持する。
 
@@ -195,6 +196,8 @@ entries:
 | `server_alive_interval` | 整数(秒) | `15` | SSH の keepalive 間隔 |
 | `server_alive_count_max` | 整数 | `3` | keepalive 応答なし許容回数 |
 | `log_file` | パス | （未指定） | ログ出力先。**未指定時は標準出力に出力する** |
+
+死活監視の TCP プローブに使う待ち時間は内部定数（接続タイムアウト 3 秒 / `remote` 判定の待機 1.0 秒）とし、v1.0 では設定できない。将来 `global.check_timeout` として公開する余地を残す。
 
 #### エントリセクション
 
@@ -225,6 +228,8 @@ entries:
 - `local_port` の重複（マージ後の全エントリ間）
 - 未知のキー名（警告のみ、動作は継続）
 - 指定された `identity` ファイルが存在しない
+- 指定された `identity` ファイルの権限が他ユーザーに開いている（`ssh` 自身が拒否するため事前に弾く）
+- `bind_address` が `0.0.0.0` / `::`（警告のみ、動作は継続）
 
 以下の場合は設定全体のエラーとして即座に終了する（終了コード 3）。
 
@@ -297,7 +302,8 @@ stopped ─────> connecting ───────────> connected
 ### 5.4 デーモンの振る舞い
 
 - `pfwd up` / `pfwd daemon` は全 `enabled` エントリを起動し、`check_interval` ごとに死活監視する。
-- 二重起動は PID ファイルで防止し、既に起動中なら明示的にエラーを返す。
+- 二重起動は PID ファイルで防止し、既に起動中なら明示的にエラーを返す（終了コード 6）。
+- デーモンが起動していない状態での `down` は、何もせず成功（終了コード 0）とする（冪等）。
 - `SIGTERM` / `SIGINT` 受信時は、配下の全 SSH プロセスを終了させてから終了する（孤児プロセスを残さない）。
 - `SIGHUP` 受信時は設定を再読み込みする（`pfwd reload` と同等）。
 
@@ -368,6 +374,7 @@ $ pfwd start metrics
 
 - 既に接続済みのエントリへの `start` は成功扱い（冪等）とし、`[ SKIP ]  already connected` を表示する。
 - 存在しないエントリ名を指定した場合はエラー終了する（終了コード 2）。
+- `start` / `stop` / `restart` / `reload` は**デーモンが起動していることが前提**であり、未起動の場合は何もせず終了コード 5 で `pfwd up` を案内する。
 
 ### 6.4 `pfwd test`
 
@@ -385,6 +392,8 @@ Config: /home/komori/.config/port-forwarder/config.yaml
 3 passed, 1 warning, 1 failed
 ```
 
+集計行は `[  OK  ]` を passed、`[ WARN ]` を warning、`[FAILED]` を failed として数える（1 エントリはいずれか 1 つに数えられる）。
+
 ### 6.5 ログ
 
 - 出力先は `log_file` に指定したパス。**未指定時は標準出力**に出力する。
@@ -400,7 +409,7 @@ Config: /home/komori/.config/port-forwarder/config.yaml
 
 - 出力レベルは `INFO` / `WARN` / `ERROR` の 3 種類を常に出力する。`-v` を付けて実行した場合のみ `DEBUG` を追加で出力する。
 - ログのローテートは行わない。ファイル出力を使う場合のサイズ管理は `logrotate` 等の OS 標準の仕組みに委ねる。
-- `pfwd logs -f` で追従表示。`pfwd logs <名前>` で該当エントリの行のみ抽出。`log_file` 未指定時はファイルが存在しないため、`journalctl` / `launchctl` のログ参照方法を案内して終了する。
+- `pfwd logs -f` で追従表示。`pfwd logs <名前>` で該当エントリの行のみ抽出。`log_file` 未指定時はファイルが存在しないため、`journalctl` によるログ参照方法（macOS ではフォアグラウンド実行または `log_file` の設定）を案内して終了する（終了コード 0）。
 - 標準出力に出している場合、systemd 配下では journald が収集するため `journalctl -u port-forwarder` で参照できる。
 
 ---
@@ -418,7 +427,7 @@ Config: /home/komori/.config/port-forwarder/config.yaml
 | `6` | 既にデーモンが起動している（`up` の二重起動） |
 | `7` | 依存コマンドが不足している |
 
-`status` はエントリの状態に関わらず、コマンド自体が成功すれば `0` を返す。ただし `--exit-code` を付けた場合、`connected` 以外が 1 つでもあれば `4` を返す（監視スクリプト連携用）。
+`status` はエントリの状態に関わらず、コマンド自体が成功すれば `0` を返す。ただし `--exit-code` を付けた場合、`connected` 以外が 1 つでもあれば `4` を返す（監視スクリプト連携用）。`--exit-code` は `status` 専用のオプションであり、3.2 の共通オプションではない。
 
 ---
 
@@ -431,7 +440,7 @@ Config: /home/komori/.config/port-forwarder/config.yaml
 | 実行ファイル | `~/.local/bin/pfwd` |
 | 設定 | `~/.config/port-forwarder/config.yaml`, `~/.config/port-forwarder/conf.d/*.yaml` |
 | ログ | `log_file` に指定したパス（未指定時は標準出力。推奨値 `~/.local/state/port-forwarder/port-forwarder.log`） |
-| 実行時状態（PID・状態ファイル） | `${XDG_RUNTIME_DIR:-~/.local/state/port-forwarder/run}/port-forwarder/` |
+| 実行時状態（PID・状態ファイル） | `${XDG_RUNTIME_DIR}/port-forwarder/`（`XDG_RUNTIME_DIR` 未設定時は `~/.local/state/port-forwarder/run/`） |
 | SSH ControlPath | 上記実行時ディレクトリ配下 |
 
 ### 8.2 システム全体で実行する場合
