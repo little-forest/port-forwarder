@@ -83,6 +83,10 @@ _PROBE_BACKEND=
 _NAME_WIDTH=10
 _SSH_ARGS=()
 _ENTRY_OPTS=()
+_TARGETS=()
+_WAIT_OK=0
+_WAIT_NG=0
+_DAEMON_PID=
 
 # デーモン制御フラグ (DESIGN 5.7)
 _DAEMON_STARTED=0
@@ -1414,12 +1418,7 @@ _health_check() { #{{{
 #{{{
 _DAEMON_RUNNING_PID=
 _CHECKS_THIS_TICK=0
-
-# ファイルの更新時刻を epoch 秒で返す
-_file_mtime() { #{{{
-  date -r "$1" '+%s' 2>/dev/null
-}
-#}}}
+_RELOAD_COUNT=0
 
 # 死活監視で使うプローブ先アドレス (待ち受けが 0.0.0.0 でも 127.0.0.1 を叩く)
 _probe_addr() { #{{{
@@ -1478,6 +1477,7 @@ _daemon_write_meta() { #{{{
     printf 'config=%s\n' "$_CONFIG_FILE"
     printf 'started=%s\n' "$_DAEMON_STARTED"
     printf 'updated=%s\n' "$(_now)"
+    printf 'reloads=%s\n' "$_RELOAD_COUNT"
   } > "$TMP" 2>/dev/null || return 1
   mv -f "$TMP" "$F" 2>/dev/null
   return 0
@@ -1726,6 +1726,7 @@ _daemon_reload() { #{{{
   _log_init
   _daemon_reconcile
   _state_flush_dirty
+  _RELOAD_COUNT=$(( _RELOAD_COUNT + 1 ))
   _daemon_write_meta
   _log_info - "config reloaded (added=${ADDED}, removed=${REMOVED}, restarted=${RESTARTED}, disabled=${DISABLED})"
   return 0
@@ -2077,6 +2078,452 @@ _cmd_config() { #{{{
 }
 #}}}
 
+# 操作対象のエントリ名を解決する (DESIGN 5.9)
+_resolve_names() { #{{{
+  local NAME
+  _TARGETS=()
+  if (( ${#_ARGS[@]} == 0 )); then
+    if [[ "$_SUBCMD" == 'start' ]]; then
+      # 省略時は enabled かつ有効なエントリのみ (SPECS 3.1)
+      for NAME in "${_CFG_NAMES[@]}"; do
+        [[ -n "${_CFG_INVALID[$NAME]}" ]] && continue
+        [[ "${_CFG[${NAME}.enabled]}" == 'false' ]] && continue
+        _TARGETS+=("$NAME")
+      done
+    else
+      _TARGETS=("${_CFG_NAMES[@]}")
+    fi
+    return 0
+  fi
+  for NAME in "${_ARGS[@]}"; do
+    _in_array "$NAME" "${_CFG_NAMES[@]}" || _error_exit "$_EXIT_USAGE" "$(_err_no_entry "$NAME")"
+    _TARGETS+=("$NAME")
+  done
+  return 0
+}
+#}}}
+
+# 実行ファイルの絶対パス
+_self_path() { #{{{
+  local P=$0
+  if [[ "$P" != /* ]]; then
+    P="${__SCRIPT_BASE}/${__SCRIPT_NAME}"
+  fi
+  printf '%s\n' "$P"
+}
+#}}}
+
+_status_color() { #{{{
+  case "$1" in
+    connected)            printf '%s' "$C_GREEN" ;;
+    connecting|retrying)  printf '%s' "$C_YELLOW" ;;
+    failed)               printf '%s' "$C_RED" ;;
+    *)                    printf '%s' "$C_GREY" ;;
+  esac
+}
+#}}}
+
+# エントリ 1 行分の補足説明 (description が無い場合は状況を出す)
+_status_note() { #{{{
+  local NAME=$1 ST=$2 NOW=$3 D
+  D=${_CFG[${NAME}.description]}
+  if [[ -n "$D" ]]; then
+    printf '%s\n' "$D"
+    return 0
+  fi
+  case "$ST" in
+    retrying)
+      printf 'next retry in %ss\n' "$(( _ST[${NAME}.next_retry_at] - NOW ))" ;;
+    failed)
+      printf '%s\n' "${_ST[${NAME}.last_error]}" ;;
+    *)
+      printf '\n' ;;
+  esac
+}
+#}}}
+
+# CLI から見たエントリの表示状態を決める
+_display_status() { #{{{
+  local NAME=$1 DAEMON_UP=$2 ST
+  ST=${_ST[${NAME}.status]}
+  if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+    printf 'failed\n'
+    return 0
+  fi
+  if [[ -z "$DAEMON_UP" ]]; then
+    # デーモン未起動時は実プロセスの有無で判定する (DESIGN 5.9)
+    case "$ST" in
+      connected|connecting|retrying)
+        if [[ -n "${_ST[${NAME}.ctl]}" && -S "${_ST[${NAME}.ctl]}" ]] \
+           && _ssh_pid_alive "${_ST[${NAME}.pid]}"; then
+          printf '%s\n' "$ST"
+        else
+          printf 'stopped\n'
+        fi
+        return 0 ;;
+    esac
+  fi
+  printf '%s\n' "$ST"
+  return 0
+}
+#}}}
+
+_cmd_status() { #{{{
+  local OPT NAME ST NOW DPID NOTE UPTIME RETRY DAEMON_UP='' WITH_EXIT_CODE=''
+  local -A COUNT=()
+  local NOT_CONNECTED=0
+  for OPT in "${_SUBCMD_OPTS[@]}"; do
+    case "$OPT" in
+      --exit-code) WITH_EXIT_CODE=yes ;;
+      *)           _usage "unknown option for 'status': ${OPT}" ;;
+    esac
+  done
+  _resolve_names
+  _calc_name_width "${_TARGETS[@]}"
+  NOW=$(_now)
+  if DPID=$(_daemon_pid); then
+    DAEMON_UP=yes
+  else
+    printf 'daemon: not running\n'
+  fi
+
+  printf '%-*s  %-10s  %-15s  %-27s  %-10s%5s  %s\n' \
+    "$_NAME_WIDTH" 'NAME' 'STATUS' 'LOCAL' 'REMOTE' 'UPTIME' 'RETRY' 'DESCRIPTION'
+
+  for NAME in "${_TARGETS[@]}"; do
+    _state_load "$NAME"
+    ST=$(_display_status "$NAME" "$DAEMON_UP")
+    COUNT[$ST]=$(( ${COUNT[$ST]:-0} + 1 ))
+    [[ "$ST" != 'connected' ]] && NOT_CONNECTED=$(( NOT_CONNECTED + 1 ))
+    if [[ "$ST" == 'connected' ]] && (( _ST[${NAME}.connected_since] > 0 )); then
+      UPTIME=$(_fmt_uptime $(( NOW - _ST[${NAME}.connected_since] )))
+    else
+      UPTIME='-'
+    fi
+    if [[ "$ST" == 'disabled' ]]; then
+      RETRY='-'
+    else
+      RETRY=${_ST[${NAME}.retry_count]}
+    fi
+    if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+      NOTE=${_CFG_INVALID[$NAME]}
+    else
+      NOTE=$(_status_note "$NAME" "$ST" "$NOW")
+    fi
+    printf '%-*s  %s%-10s%s  %-15s  %-27s  %-10s%5s  %s\n' \
+      "$_NAME_WIDTH" "$NAME" \
+      "$(_status_color "$ST")" "$ST" "$C_OFF" \
+      "${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]}" \
+      "${_CFG[${NAME}.remote_host]}:${_CFG[${NAME}.remote_port]}" \
+      "$UPTIME" "$RETRY" "$NOTE"
+  done
+
+  # 集計行
+  local S SUMMARY=''
+  for S in connected connecting retrying stopped disabled failed; do
+    (( ${COUNT[$S]:-0} > 0 )) || continue
+    [[ -n "$SUMMARY" ]] && SUMMARY="${SUMMARY}, "
+    SUMMARY="${SUMMARY}${COUNT[$S]} ${S}"
+  done
+  printf '\n%d entries: %s\n' "${#_TARGETS[@]}" "$SUMMARY"
+
+  if [[ -n "$WITH_EXIT_CODE" ]] && (( NOT_CONNECTED > 0 )); then
+    exit "$_EXIT_CONNECT"
+  fi
+  return 0
+}
+#}}}
+
+# desired を書いた後、state の変化を待って結果を表示する (DESIGN 5.9)
+_wait_result() { #{{{
+  local EXPECT=$1 TIMEOUT=$2
+  shift 2
+  local -a NAMES=("$@")
+  local -A SETTLED=()
+  local NAME ST I MAX ALL
+  _WAIT_OK=0
+  _WAIT_NG=0
+  (( ${#NAMES[@]} == 0 )) && return 0
+  MAX=$(( TIMEOUT * 5 ))   # 0.2 秒間隔
+  for (( I = 0; I <= MAX; I++ )); do
+    ALL=1
+    for NAME in "${NAMES[@]}"; do
+      [[ -n "${SETTLED[$NAME]}" ]] && continue
+      _state_load "$NAME"
+      ST=${_ST[${NAME}.status]}
+      if [[ "$ST" == "$EXPECT" || "$ST" == 'failed' ]]; then
+        SETTLED[$NAME]=$ST
+      else
+        ALL=0
+      fi
+    done
+    (( ALL )) && break
+    sleep 0.2
+  done
+  for NAME in "${NAMES[@]}"; do
+    _state_load "$NAME"
+    ST=${SETTLED[$NAME]:-${_ST[${NAME}.status]}}
+    if [[ "$ST" == "$EXPECT" ]]; then
+      if [[ "$EXPECT" == 'connected' ]]; then
+        _show_result OK "$NAME" "connected (${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]} -> ${_CFG[${NAME}.remote_host]}:${_CFG[${NAME}.remote_port]})"
+      else
+        _show_result OK "$NAME" "$ST"
+      fi
+      _WAIT_OK=$(( _WAIT_OK + 1 ))
+    elif [[ "$ST" == 'failed' ]]; then
+      _show_result FAILED "$NAME" "${_ST[${NAME}.last_error]:-failed}"
+      _WAIT_NG=$(( _WAIT_NG + 1 ))
+    else
+      _show_result FAILED "$NAME" "timed out waiting for '${EXPECT}' (current: ${ST})"
+      _WAIT_NG=$(( _WAIT_NG + 1 ))
+    fi
+  done
+  return 0
+}
+#}}}
+
+# デーモンの生存を確認し、PID を _DAEMON_PID に入れる。
+# 値を stdout で返すとコマンド置換の中でしか exit できないため、変数で渡す。
+_require_daemon() { #{{{
+  _DAEMON_PID=$(_daemon_pid) || _error_exit "$_EXIT_NO_DAEMON" "$(_err_no_daemon)"
+  return 0
+}
+#}}}
+
+_cmd_start() { #{{{
+  local NAME DPID SKIP=0
+  local -a WAITING=()
+  _require_daemon
+  DPID=$_DAEMON_PID
+  _resolve_names
+  _calc_name_width "${_TARGETS[@]}"
+  for NAME in "${_TARGETS[@]}"; do
+    _state_load "$NAME"
+    if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+      _show_result FAILED "$NAME" "${_CFG_INVALID[$NAME]}"
+      continue
+    fi
+    if [[ "${_ST[${NAME}.status]}" == 'connected' ]]; then
+      _show_result SKIP "$NAME" 'already connected'
+      SKIP=$(( SKIP + 1 ))
+      continue
+    fi
+    if ! _desired_set "$NAME" up; then
+      _show_result FAILED "$NAME" 'cannot write the desired state file'
+      continue
+    fi
+    WAITING+=("$NAME")
+  done
+  (( ${#WAITING[@]} > 0 )) && kill -USR1 "$DPID" 2>/dev/null
+  _wait_result connected $(( _GLOBAL[connect_timeout] + 5 )) "${WAITING[@]}"
+  local NG=$(( _WAIT_NG + ${#_TARGETS[@]} - ${#WAITING[@]} - SKIP ))
+  [[ -z "$_QUIET" ]] && printf '%d started, %d failed\n' "$(( _WAIT_OK + SKIP ))" "$NG"
+  (( NG > 0 )) && return "$_EXIT_CONNECT"
+  return 0
+}
+#}}}
+
+_cmd_stop() { #{{{
+  local NAME DPID
+  local -a WAITING=()
+  _require_daemon
+  DPID=$_DAEMON_PID
+  _resolve_names
+  _calc_name_width "${_TARGETS[@]}"
+  for NAME in "${_TARGETS[@]}"; do
+    _state_load "$NAME"
+    if ! _desired_set "$NAME" down; then
+      _show_result FAILED "$NAME" 'cannot write the desired state file'
+      continue
+    fi
+    WAITING+=("$NAME")
+  done
+  (( ${#WAITING[@]} > 0 )) && kill -USR1 "$DPID" 2>/dev/null
+  _wait_result stopped 10 "${WAITING[@]}"
+  local NG=$(( _WAIT_NG + ${#_TARGETS[@]} - ${#WAITING[@]} ))
+  [[ -z "$_QUIET" ]] && printf '%d stopped, %d failed\n' "$_WAIT_OK" "$NG"
+  (( NG > 0 )) && return "$_EXIT_CONNECT"
+  return 0
+}
+#}}}
+
+_cmd_restart() { #{{{
+  local NAME DPID
+  local -a WAITING=()
+  _require_daemon
+  DPID=$_DAEMON_PID
+  _resolve_names
+  _calc_name_width "${_TARGETS[@]}"
+  # 一度 down にしてから up にすることでバックオフをリセットする (SPECS 5.3)
+  for NAME in "${_TARGETS[@]}"; do
+    _state_load "$NAME"
+    if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+      _show_result FAILED "$NAME" "${_CFG_INVALID[$NAME]}"
+      continue
+    fi
+    _desired_set "$NAME" down || continue
+    WAITING+=("$NAME")
+  done
+  if (( ${#WAITING[@]} == 0 )); then
+    [[ -z "$_QUIET" ]] && printf '0 restarted, %d failed\n' "${#_TARGETS[@]}"
+    return "$_EXIT_CONNECT"
+  fi
+  kill -USR1 "$DPID" 2>/dev/null
+  _wait_stopped_quiet 10 "${WAITING[@]}"
+  for NAME in "${WAITING[@]}"; do
+    _desired_set "$NAME" up
+  done
+  kill -USR1 "$DPID" 2>/dev/null
+  _wait_result connected $(( _GLOBAL[connect_timeout] + 5 )) "${WAITING[@]}"
+  local NG=$(( _WAIT_NG + ${#_TARGETS[@]} - ${#WAITING[@]} ))
+  [[ -z "$_QUIET" ]] && printf '%d restarted, %d failed\n' "$_WAIT_OK" "$NG"
+  (( NG > 0 )) && return "$_EXIT_CONNECT"
+  return 0
+}
+#}}}
+
+# 表示せずに停止完了を待つ (restart の前半で使う)
+_wait_stopped_quiet() { #{{{
+  local TIMEOUT=$1
+  shift
+  local -a NAMES=("$@")
+  local NAME I MAX ALL ST
+  MAX=$(( TIMEOUT * 5 ))
+  for (( I = 0; I <= MAX; I++ )); do
+    ALL=1
+    for NAME in "${NAMES[@]}"; do
+      _state_load "$NAME"
+      ST=${_ST[${NAME}.status]}
+      [[ "$ST" == 'stopped' || "$ST" == 'failed' || "$ST" == 'disabled' ]] || ALL=0
+    done
+    (( ALL )) && return 0
+    sleep 0.2
+  done
+  return 1
+}
+#}}}
+
+_cmd_up() { #{{{
+  local PID I SELF
+  local -a CMD=()
+  if PID=$(_daemon_pid); then
+    _error_exit "$_EXIT_RUNNING" "$(_err_daemon_running "$PID")"
+  fi
+  SELF=$(_self_path)
+  CMD=("$SELF" --config "$_CONFIG_FILE")
+  [[ -n "$_NO_COLOR" ]] && CMD+=(--no-color)
+  CMD+=(daemon)
+  _debug "starting daemon: ${CMD[*]}"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "${CMD[@]}" </dev/null >/dev/null 2>&1 &
+  else
+    # nohup は SIGHUP を無視状態にしてしまい reload (SIGHUP) を受け取れなくなるため
+    # 使わない。端末からの SIGINT だけをサブシェルで無視させる。
+    ( trap '' INT; exec "${CMD[@]}" ) </dev/null >/dev/null 2>&1 &
+  fi
+  disown 2>/dev/null
+  for (( I = 0; I < 50; I++ )); do
+    if PID=$(_daemon_pid); then
+      __show_info "daemon started (pid=${PID})"
+      return 0
+    fi
+    sleep 0.1
+  done
+  _error_exit "$_EXIT_ERROR" "daemon did not start within 5s. Run '${__SCRIPT_NAME} daemon' in the foreground to see why."
+}
+#}}}
+
+_cmd_down() { #{{{
+  local PID I NAME CTL
+  if ! PID=$(_daemon_pid); then
+    __show_info 'daemon is not running'
+    return 0
+  fi
+  kill -TERM "$PID" 2>/dev/null
+  for (( I = 0; I < 150; I++ )); do
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$PID" 2>/dev/null; then
+    __show_warn "daemon (pid=${PID}) did not stop within 15s; sending SIGKILL"
+    kill -KILL "$PID" 2>/dev/null
+    sleep 0.5
+    # 残ったセッションを ControlPath 経由で掃除する
+    for NAME in "${_CFG_NAMES[@]}"; do
+      _state_load "$NAME"
+      CTL=${_ST[${NAME}.ctl]}
+      [[ -n "$CTL" && -S "$CTL" ]] || continue
+      ssh -O exit -S "$CTL" -o BatchMode=yes "${_CFG[${NAME}.host]}" >/dev/null 2>&1
+      _ssh_stop "$NAME"
+    done
+    rm -f "${_RUN_DIR}/daemon.pid" "${_RUN_DIR}/daemon.meta" 2>/dev/null
+    rm -rf "${_RUN_DIR}/daemon.lock" 2>/dev/null
+  fi
+  __show_info 'daemon stopped'
+  return 0
+}
+#}}}
+
+_cmd_reload() { #{{{
+  local PID OLD NEW I META="${_RUN_DIR}/daemon.meta"
+  _require_daemon
+  PID=$_DAEMON_PID
+  # 完了判定は daemon.meta の内容変化で行う (mtime の 1 秒粒度に依存しないため)
+  OLD=$(cat "$META" 2>/dev/null)
+  kill -HUP "$PID" 2>/dev/null
+  for (( I = 0; I < 50; I++ )); do
+    NEW=$(cat "$META" 2>/dev/null)
+    if [[ -n "$NEW" && "$NEW" != "$OLD" ]]; then
+      __show_info 'config reloaded'
+      return 0
+    fi
+    sleep 0.1
+  done
+  __show_warn "the daemon did not report the reload within 5s; check the log"
+  return "$_EXIT_ERROR"
+}
+#}}}
+
+_cmd_logs() { #{{{
+  local OPT NAME LOG FOLLOW=''
+  for OPT in "${_SUBCMD_OPTS[@]}"; do
+    case "$OPT" in
+      -f) FOLLOW=yes ;;
+      *)  _usage "unknown option for 'logs': ${OPT}" ;;
+    esac
+  done
+  LOG=${_GLOBAL[log_file]}
+  if [[ -z "$LOG" ]]; then
+    # 標準出力に出している場合の参照方法を案内する (SPECS 6.5)
+    cat <<PFWD_LOGS_HINT
+global.log_file is not set, so logs go to standard output.
+  - systemd (user)  : journalctl --user -u port-forwarder -f
+  - systemd (system): journalctl -u port-forwarder -f
+  - macOS           : run '${__SCRIPT_NAME} daemon' in the foreground, or set global.log_file
+PFWD_LOGS_HINT
+    return 0
+  fi
+  LOG=$(_expand_tilde "$LOG")
+  [[ -f "$LOG" ]] || _error_exit "$_EXIT_ERROR" "log file not found: ${LOG}"
+  NAME=${_ARGS[0]}
+  if [[ -n "$NAME" ]]; then
+    _in_array "$NAME" "${_CFG_NAMES[@]}" || _error_exit "$_EXIT_USAGE" "$(_err_no_entry "$NAME")"
+    if [[ -n "$FOLLOW" ]]; then
+      tail -n 200 -f "$LOG" | grep --line-buffered -F "[${NAME}]"
+    else
+      grep -F "[${NAME}]" "$LOG"
+    fi
+    return 0
+  fi
+  if [[ -n "$FOLLOW" ]]; then
+    tail -n 200 -f "$LOG"
+  else
+    tail -n 200 "$LOG"
+  fi
+  return 0
+}
+#}}}
+
 _cmd_daemon() { #{{{
   _daemon_main
 }
@@ -2202,10 +2649,51 @@ case "$_SUBCMD" in
     _config_setup
     _setup_runtime_dir
     _cmd_daemon ;;
+  status)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_status ;;
+  start)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_start ;;
+  stop)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_stop ;;
+  restart)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_restart ;;
+  up)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_up ;;
+  down)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_down ;;
+  reload)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_reload ;;
+  logs)
+    _check_prerequisites
+    _config_setup
+    _setup_runtime_dir
+    _cmd_logs ;;
   *)
     _usage "unknown subcommand: ${_SUBCMD}" ;;
 esac
+_RC=$?
 
-exit "$_EXIT_OK"
+exit "$_RC"
 
 # vim: ts=2 sw=2 sts=2 et nu foldmethod=marker
