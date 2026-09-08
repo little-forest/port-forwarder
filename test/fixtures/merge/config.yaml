@@ -1,0 +1,20 @@
+global:
+  check_interval: 30
+  connect_timeout: 10
+
+entries:
+  db-prod:
+    description: production db tunnel
+    host: bastion.example.com
+    user: komori
+    local_port: 15432
+    remote_host: db.internal
+    remote_port: 5432
+  metrics:
+    host: bastion.example.com
+    user: komori
+    local_port: 19090
+    remote_host: prom.internal
+    remote_port: 9090
+    ssh_options:
+      - Compression=yes

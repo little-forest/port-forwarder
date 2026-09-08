@@ -1,0 +1,13 @@
+entries:
+  this-entry-name-is-far-too-long-to-be-accepted:
+    host: bastion.example.com
+    local_port: 15432
+    remote_port: 5432
+  "bad name!":
+    host: bastion.example.com
+    local_port: 15433
+    remote_port: 5432
+  good.name_1-ok:
+    host: bastion.example.com
+    local_port: 15434
+    remote_port: 5432

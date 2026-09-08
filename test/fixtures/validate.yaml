@@ -1,0 +1,37 @@
+entries:
+  no-remote-port:
+    host: bastion.example.com
+    local_port: 15432
+  port-out-of-range:
+    host: bastion.example.com
+    local_port: 99999
+    remote_port: 5432
+  bad-mode:
+    host: bastion.example.com
+    local_port: 15001
+    remote_port: 5432
+    check_mode: bogus
+  unknown-key:
+    host: bastion.example.com
+    local_port: 15002
+    remote_port: 5432
+    typo_key: whatever
+  enabled-yes:
+    host: bastion.example.com
+    local_port: 15003
+    remote_port: 5432
+    enabled: yes
+  enabled-zero:
+    host: bastion.example.com
+    local_port: 15004
+    remote_port: 5432
+    enabled: 0
+  missing-identity:
+    host: bastion.example.com
+    local_port: 15005
+    remote_port: 5432
+    identity: /nonexistent/key/file
+  good:
+    host: bastion.example.com
+    local_port: 15006
+    remote_port: 5432

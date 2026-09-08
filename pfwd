@@ -8,10 +8,13 @@
 # shellcheck disable=SC2006
 
 #- bash version check ----------------------------------------------------------
-# 連想配列を使うため bash 4.0 以上が必須 (DESIGN 1.1 / 7.2)。
-# 後続の declare -A より前に判定する必要があるため、関数化せずここで実行する。
-if [[ -z "${BASH_VERSINFO[0]}" ]] || (( BASH_VERSINFO[0] < 4 )); then
-  echo "[ ERROR ] bash 4.0 or later is required (current: ${BASH_VERSION:-unknown}). On macOS: brew install bash" >&2
+# 連想配列を使うため bash 4 系が必須 (DESIGN 1.1 / 7.2)。
+# グローバル宣言に declare -g を使う (bats から関数内で source されても
+# グローバルに宣言されるようにするため) 都合上、下限は 4.2 とする。
+# 後続の declare より前に判定する必要があるため、関数化せずここで実行する。
+if [[ -z "${BASH_VERSINFO[0]}" ]] \
+  || (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2 ) )); then
+  echo "[ ERROR ] bash 4.2 or later is required (current: ${BASH_VERSION:-unknown}). On macOS: brew install bash" >&2
   exit 7
 fi
 
@@ -62,15 +65,15 @@ _SUBCMD_OPTS=()
 _CONFIG_FILE=
 _CONFIG_FILES=()
 _CFG_NAMES=()
-declare -A _CFG=()
-declare -A _CFG_OPTS=()
-declare -A _GLOBAL=()
-declare -A _CFG_INVALID=()
-declare -A _CFG_SOURCE=()
+declare -gA _CFG=()
+declare -gA _CFG_OPTS=()
+declare -gA _GLOBAL=()
+declare -gA _CFG_INVALID=()
+declare -gA _CFG_SOURCE=()
 
 # 状態 (DESIGN 4.4)
-declare -A _ST=()
-declare -A _ST_DIRTY=()
+declare -gA _ST=()
+declare -gA _ST_DIRTY=()
 
 # 実行時
 _RUN_DIR=
@@ -172,6 +175,7 @@ __get_tmp_base() { #{{{
 }
 #}}}
 
+# shellcheck disable=SC2120  # 引数 -d は任意 (template.sh 由来)
 __make_tmp() { #{{{
   local TMP_BASE
   TMP_BASE=`__get_tmp_base`
@@ -442,6 +446,458 @@ _err_no_entry()        { #{{{
 #}}}
 
 #-------------------------------------------------------------------------------
+#- config functions ------------------------------------------------------------
+#{{{
+# 既知キー (未知キーは警告のみ / SPECS 4.4)
+_KNOWN_ENTRY_KEYS=(description host user port identity local_port remote_host \
+                   remote_port bind_address enabled check_mode check_interval ssh_options)
+_KNOWN_GLOBAL_KEYS=(check_interval connect_timeout retry_initial retry_max retry_limit \
+                    server_alive_interval server_alive_count_max log_file)
+# yq の標準エラー出力を受けるファイル (遅延生成)
+_YQ_ERR_FILE=
+# 検証結果の警告表示を抑止する (test サブコマンドが自前で表示するため)
+_NO_CFG_WARN=
+
+# ユーザー設定ファイルの既定パス (SPECS 4.1)
+_config_user_path() { #{{{
+  if [[ -n "$XDG_CONFIG_HOME" ]]; then
+    printf '%s\n' "${XDG_CONFIG_HOME}/port-forwarder/config.yaml"
+  else
+    printf '%s\n' "${HOME}/.config/port-forwarder/config.yaml"
+  fi
+}
+#}}}
+
+# 使用する設定ファイルを決定する (SPECS 4.1)
+_config_find() { #{{{
+  local P
+  if [[ -n "$_OPT_CONFIG" ]]; then
+    P=$(_expand_tilde "$_OPT_CONFIG")
+    [[ -f "$P" ]] || _error_exit "$_EXIT_CONFIG" "$(_err_no_config "$P")"
+    _CONFIG_FILE=$P
+    return 0
+  fi
+  local CANDIDATES=()
+  CANDIDATES+=("$(_config_user_path)")
+  CANDIDATES+=('/etc/port-forwarder/config.yaml')
+  for P in "${CANDIDATES[@]}"; do
+    if [[ -f "$P" ]]; then
+      _CONFIG_FILE=$P
+      return 0
+    fi
+  done
+  _error_exit "$_EXIT_CONFIG" "$(_err_no_config "${CANDIDATES[0]}")"
+}
+#}}}
+
+# メイン設定 + conf.d/*.yaml|yml を名前順に並べる (SPECS 4.1)
+_config_file_list() { #{{{
+  local DIR CONFD F
+  _CONFIG_FILES=("$_CONFIG_FILE")
+  DIR=$(dirname "$_CONFIG_FILE")
+  CONFD="${DIR}/conf.d"
+  [[ -d "$CONFD" ]] || return 0
+  local LIST=() SORTED=()
+  shopt -s nullglob
+  LIST=("$CONFD"/*.yaml "$CONFD"/*.yml)
+  shopt -u nullglob
+  (( ${#LIST[@]} == 0 )) && return 0
+  mapfile -t SORTED < <(printf '%s\n' "${LIST[@]}" | LC_ALL=C sort)
+  for F in "${SORTED[@]}"; do
+    [[ -f "$F" ]] && _CONFIG_FILES+=("$F")
+  done
+  return 0
+}
+#}}}
+
+# エントリの既存キーをすべて削除する (エントリ単位の置換 / DESIGN 4.1)
+_config_purge_entry() { #{{{
+  local NAME=$1 K
+  for K in "${!_CFG[@]}"; do
+    [[ "$K" == "${NAME}."* ]] && unset "_CFG[$K]"
+  done
+  unset "_CFG_OPTS[$NAME]"
+  unset "_CFG_INVALID[$NAME]"
+  return 0
+}
+#}}}
+
+# エントリを無効化する (該当エントリのみ無効 / SPECS 4.4)
+_config_invalidate() { #{{{
+  local NAME=$1
+  shift
+  _CFG_INVALID[$NAME]=$*
+  return 0
+}
+#}}}
+
+_is_port() { #{{{
+  local V=$1
+  [[ "$V" =~ ^[0-9]+$ ]] || return 1
+  (( V >= 1 && V <= 65535 )) || return 1
+  return 0
+}
+#}}}
+
+# ls -ln の 1 列目からパーミッションを 8 進数で得る (stat の OS 差異を避ける)
+_file_mode_octal() { #{{{
+  local F=$1 LINE M I DIGIT RES=
+  # stat のオプション差異 (GNU / BSD) を避けるため ls -ln をパースする (DESIGN 4.3)
+  # shellcheck disable=SC2012
+  LINE=$(ls -ln "$F" 2>/dev/null | head -1)
+  [[ -z "$LINE" ]] && return 1
+  M=${LINE%% *}
+  M=${M:1:9}
+  (( ${#M} < 9 )) && return 1
+  for I in 0 3 6; do
+    DIGIT=0
+    [[ "${M:$I:1}" == 'r' ]] && DIGIT=$(( DIGIT + 4 ))
+    [[ "${M:$(( I + 1 )):1}" == 'w' ]] && DIGIT=$(( DIGIT + 2 ))
+    [[ "${M:$(( I + 2 )):1}" =~ ^[xsSt]$ ]] && DIGIT=$(( DIGIT + 1 ))
+    RES="${RES}${DIGIT}"
+  done
+  printf '0%s\n' "$RES"
+  return 0
+}
+#}}}
+
+# 設定ファイル 1 つを読み込む (DESIGN 4.1 の yq クエリ 0〜4)
+_config_parse_file() { #{{{
+  local FILE=$1
+  local TAG NAME KEY VAL OPT LINE TABS RC
+
+  # shellcheck disable=SC2119
+  [[ -z "$_YQ_ERR_FILE" ]] && _YQ_ERR_FILE=$(__make_tmp)
+
+  # 0. 構造検証
+  TAG=$(yq -r '.entries | tag' "$FILE" 2>"$_YQ_ERR_FILE")
+  RC=$?
+  if (( RC != 0 )); then
+    _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "$(_sanitize "$(cat "$_YQ_ERR_FILE")")")"
+  fi
+  if [[ "$TAG" != '!!map' && "$TAG" != '!!null' ]]; then
+    _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "'entries' must be a map (got ${TAG})")"
+  fi
+
+  # 1. エントリ名 (記述順) と値の型
+  while IFS=$'\t' read -r NAME TAG; do
+    [[ -z "$NAME" ]] && continue
+    if [[ -n "${_CFG_SOURCE[$NAME]}" ]]; then
+      _config_purge_entry "$NAME"
+    else
+      _CFG_NAMES+=("$NAME")
+    fi
+    _CFG_SOURCE[$NAME]=$FILE
+    if [[ "$TAG" != '!!map' ]]; then
+      _config_invalidate "$NAME" "entry must be a map (got ${TAG})"
+    fi
+  done < <(yq -r '.entries // {} | to_entries[] | [.key, (.value | tag)] | @tsv' "$FILE" 2>/dev/null)
+
+  # 2. global (キー単位の後勝ち)
+  while IFS=$'\t' read -r KEY VAL; do
+    [[ -z "$KEY" ]] && continue
+    [[ "$VAL" == 'null' ]] && VAL=
+    _GLOBAL[$KEY]=$VAL
+  done < <(yq -r '.global // {} | to_entries[] | [.key, .value] | @tsv' "$FILE" 2>/dev/null)
+
+  # 3. エントリのスカラー値 ($n は yq のクエリ内変数のためシングルクォートのままとする)
+  # shellcheck disable=SC2016
+  while IFS= read -r LINE; do
+    [[ -z "$LINE" ]] && continue
+    TABS=${LINE//[^$'\t']/}
+    IFS=$'\t' read -r NAME KEY VAL <<<"$LINE"
+    if (( ${#TABS} != 2 )); then
+      # 値にタブが含まれ列がずれた場合は当該エントリを無効化する
+      _config_invalidate "$NAME" "value of '${KEY}' contains a tab character"
+      continue
+    fi
+    [[ -z "$NAME" || -z "$KEY" ]] && continue
+    [[ "$VAL" == 'null' ]] && VAL=
+    _CFG[${NAME}.${KEY}]=$VAL
+  done < <(yq -r '.entries // {} | to_entries[]
+                 | select((.value | tag) == "!!map")
+                 | .key as $n | .value | to_entries[]
+                 | select((.value | tag) != "!!seq" and (.value | tag) != "!!map")
+                 | [$n, .key, .value] | @tsv' "$FILE" 2>/dev/null)
+
+  # 4. ssh_options (配列。$n は yq のクエリ内変数)
+  # shellcheck disable=SC2016
+  while IFS=$'\t' read -r NAME OPT; do
+    [[ -z "$NAME" ]] && continue
+    if [[ "$OPT" == *"$_US"* ]]; then
+      _config_invalidate "$NAME" "ssh_options must not contain a 0x1f character"
+      continue
+    fi
+    if [[ -n "${_CFG_OPTS[$NAME]}" ]]; then
+      _CFG_OPTS[$NAME]="${_CFG_OPTS[$NAME]}${_US}${OPT}"
+    else
+      _CFG_OPTS[$NAME]=$OPT
+    fi
+  done < <(yq -r '.entries // {} | to_entries[]
+                 | select((.value | tag) == "!!map")
+                 | select((.value.ssh_options // [] | tag) == "!!seq")
+                 | .key as $n | (.value.ssh_options // []) | .[] | [$n, .] | @tsv' "$FILE" 2>/dev/null)
+
+  return 0
+}
+#}}}
+
+# 既定値を埋める (SPECS 4.3 / DESIGN 4.2)
+_config_apply_defaults() { #{{{
+  local NAME KEY V
+  local -A GDEF=(
+    [check_interval]=30
+    [connect_timeout]=10
+    [retry_initial]=5
+    [retry_max]=300
+    [retry_limit]=0
+    [server_alive_interval]=15
+    [server_alive_count_max]=3
+  )
+  for KEY in "${!GDEF[@]}"; do
+    [[ -z "${_GLOBAL[$KEY]}" ]] && _GLOBAL[$KEY]=${GDEF[$KEY]}
+  done
+  [[ -z "${_GLOBAL[log_file]}" ]] && _GLOBAL[log_file]=
+
+  if [[ "${_GLOBAL[check_interval]}" =~ ^[0-9]+$ ]] && (( _GLOBAL[check_interval] < _MIN_CHECK_INTERVAL )); then
+    __show_warn "global.check_interval ${_GLOBAL[check_interval]} is below the minimum ${_MIN_CHECK_INTERVAL}; using ${_MIN_CHECK_INTERVAL}"
+    _GLOBAL[check_interval]=$_MIN_CHECK_INTERVAL
+  fi
+
+  for NAME in "${_CFG_NAMES[@]}"; do
+    [[ -z "${_CFG[${NAME}.user]}" ]]           && _CFG[${NAME}.user]=${USER:-}
+    [[ -z "${_CFG[${NAME}.port]}" ]]           && _CFG[${NAME}.port]=22
+    [[ -z "${_CFG[${NAME}.remote_host]}" ]]    && _CFG[${NAME}.remote_host]=localhost
+    [[ -z "${_CFG[${NAME}.bind_address]}" ]]   && _CFG[${NAME}.bind_address]=127.0.0.1
+    [[ -z "${_CFG[${NAME}.enabled]}" ]]        && _CFG[${NAME}.enabled]=true
+    [[ -z "${_CFG[${NAME}.check_mode]}" ]]     && _CFG[${NAME}.check_mode]=remote
+    if [[ -z "${_CFG[${NAME}.check_interval]}" ]]; then
+      _CFG[${NAME}.check_interval]=${_GLOBAL[check_interval]}
+    elif [[ "${_CFG[${NAME}.check_interval]}" =~ ^[0-9]+$ ]] && (( _CFG[${NAME}.check_interval] < _MIN_CHECK_INTERVAL )); then
+      __show_warn "[${NAME}] check_interval ${_CFG[${NAME}.check_interval]} is below the minimum ${_MIN_CHECK_INTERVAL}; using ${_MIN_CHECK_INTERVAL}"
+      _CFG[${NAME}.check_interval]=$_MIN_CHECK_INTERVAL
+    fi
+    V=${_CFG[${NAME}.identity]}
+    [[ -n "$V" ]] && _CFG[${NAME}.identity]=$(_expand_tilde "$V")
+  done
+  return 0
+}
+#}}}
+
+# 真偽値表記を true / false に正規化する
+_normalize_bool() { #{{{
+  local V=$1
+  case "${V,,}" in
+    true|yes|1|on)   printf 'true\n';  return 0 ;;
+    false|no|0|off)  printf 'false\n'; return 0 ;;
+  esac
+  printf '%s\n' "$V"
+  return 1
+}
+#}}}
+
+# 設定の検証 (SPECS 4.4 / DESIGN 4.3)
+_config_validate() { #{{{
+  local NAME KEY V SUF OTHER PKEY MODE
+  local -A SEEN_PORT=()
+
+  for NAME in "${_CFG_NAMES[@]}"; do
+    [[ -n "${_CFG_INVALID[$NAME]}" ]] && continue
+
+    if [[ ! "$NAME" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
+      _config_invalidate "$NAME" "invalid entry name (must match [A-Za-z0-9._-]{1,32})"
+      continue
+    fi
+
+    # 必須キー
+    local BAD=
+    for KEY in host local_port remote_port; do
+      if [[ -z "${_CFG[${NAME}.${KEY}]}" ]]; then
+        _config_invalidate "$NAME" "$(_err_missing_key "$NAME" "$KEY")"
+        BAD=yes
+        break
+      fi
+    done
+    [[ -n "$BAD" ]] && continue
+
+    # ポート範囲
+    for KEY in local_port remote_port port; do
+      V=${_CFG[${NAME}.${KEY}]}
+      if ! _is_port "$V"; then
+        _config_invalidate "$NAME" "$(_err_bad_port "$NAME" "$KEY" "$V")"
+        BAD=yes
+        break
+      fi
+    done
+    [[ -n "$BAD" ]] && continue
+
+    # local_port の重複 (重複したら両方を無効化する)
+    PKEY="${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]}"
+    if [[ -n "${SEEN_PORT[$PKEY]}" ]]; then
+      OTHER=${SEEN_PORT[$PKEY]}
+      V=$(_err_dup_port "${_CFG[${NAME}.local_port]}" "$OTHER" "$NAME")
+      _config_invalidate "$NAME" "$V"
+      _config_invalidate "$OTHER" "$V"
+      continue
+    fi
+    SEEN_PORT[$PKEY]=$NAME
+
+    # identity の存在と権限
+    V=${_CFG[${NAME}.identity]}
+    if [[ -n "$V" ]]; then
+      if [[ ! -f "$V" ]]; then
+        _config_invalidate "$NAME" "$(_err_no_identity "$NAME" "$V")"
+        continue
+      fi
+      local MODE
+      MODE=$(_file_mode_octal "$V")
+      if [[ -n "$MODE" && "${MODE:2:2}" != '00' ]]; then
+        _config_invalidate "$NAME" "$(_err_key_perm "$NAME" "$V" "$MODE")"
+        continue
+      fi
+    fi
+
+    # check_mode
+    MODE=${_CFG[${NAME}.check_mode]}
+    if [[ "$MODE" != 'process' && "$MODE" != 'tcp' && "$MODE" != 'remote' ]]; then
+      _config_invalidate "$NAME" "[${NAME}] invalid check_mode '${MODE}' (must be process, tcp or remote)"
+      continue
+    fi
+
+    # enabled の正規化
+    if ! V=$(_normalize_bool "${_CFG[${NAME}.enabled]}"); then
+      _config_invalidate "$NAME" "[${NAME}] invalid enabled value '${_CFG[${NAME}.enabled]}'"
+      continue
+    fi
+    _CFG[${NAME}.enabled]=$V
+
+    # check_interval
+    V=${_CFG[${NAME}.check_interval]}
+    if [[ ! "$V" =~ ^[0-9]+$ ]]; then
+      _config_invalidate "$NAME" "[${NAME}] check_interval must be an integer (got '${V}')"
+      continue
+    fi
+
+    # bind_address の安全性 (SPECS 11 章)
+    V=${_CFG[${NAME}.bind_address]}
+    if [[ "$V" == '0.0.0.0' || "$V" == '::' ]]; then
+      __show_warn "[${NAME}] bind_address ${V} exposes local port ${_CFG[${NAME}.local_port]} to other hosts"
+    fi
+
+    # 未知キー (警告のみ)
+    for KEY in "${!_CFG[@]}"; do
+      [[ "$KEY" == "${NAME}."* ]] || continue
+      SUF=${KEY#"${NAME}".}
+      [[ "$SUF" == *.* ]] && continue
+      _in_array "$SUF" "${_KNOWN_ENTRY_KEYS[@]}" && continue
+      __show_warn "[${NAME}] unknown key '${SUF}' (ignored)"
+    done
+  done
+
+  # 未知の global キー (警告のみ)
+  for KEY in "${!_GLOBAL[@]}"; do
+    _in_array "$KEY" "${_KNOWN_GLOBAL_KEYS[@]}" && continue
+    __show_warn "unknown key 'global.${KEY}' (ignored)"
+  done
+
+  # 無効エントリの警告 (ポート重複のように 2 エントリで同一のものは 1 回だけ出す)
+  if [[ -z "$_NO_CFG_WARN" ]]; then
+    local -A SEEN_MSG=()
+    for NAME in "${_CFG_NAMES[@]}"; do
+      V=${_CFG_INVALID[$NAME]}
+      [[ -z "$V" || -n "${SEEN_MSG[$V]}" ]] && continue
+      SEEN_MSG[$V]=1
+      __show_warn "$V"
+    done
+  fi
+  return 0
+}
+#}}}
+
+# 設定ファイルが他ユーザーから書き込み可能なら警告する (SPECS 11 章)
+_config_check_perms() { #{{{
+  local F MODE
+  for F in "${_CONFIG_FILES[@]}"; do
+    MODE=$(_file_mode_octal "$F") || continue
+    if [[ "${MODE:2:1}" == [2367] || "${MODE:3:1}" == [2367] ]]; then
+      __show_warn "config file ${F} is writable by other users (${MODE})"
+    fi
+  done
+  return 0
+}
+#}}}
+
+# 設定の探索・読み込み・検証をまとめて行う
+_config_setup() { #{{{
+  _config_find
+  _config_file_list
+  local F
+  for F in "${_CONFIG_FILES[@]}"; do
+    _debug "loading config: ${F}"
+    _config_parse_file "$F"
+  done
+  if (( ${#_CFG_NAMES[@]} == 0 )); then
+    _error_exit "$_EXIT_CONFIG" "$(_err_no_entries "$_CONFIG_FILE")"
+  fi
+  _config_apply_defaults
+  _config_validate
+  _config_check_perms
+  return 0
+}
+#}}}
+
+# 設定ファイルの雛形を生成する (SPECS 4.5)
+_config_init() { #{{{
+  local PATH_=$1 FORCE=$2 DIR
+  if [[ -e "$PATH_" && -z "$FORCE" ]]; then
+    _error_exit "$_EXIT_ERROR" "config file already exists: ${PATH_}. Use --force to overwrite it."
+  fi
+  DIR=$(dirname "$PATH_")
+  if [[ ! -d "$DIR" ]] && ! mkdir -p "$DIR" 2>/dev/null; then
+    _error_exit "$_EXIT_ERROR" "cannot create directory: ${DIR}"
+  fi
+  cat > "$PATH_" <<'PFWD_CONFIG_TEMPLATE'
+# port-forwarder configuration
+#
+# See 'pfwd help config' and SPECS.md for the full reference.
+
+# グローバル設定 (省略可。省略時は既定値)
+global:
+  check_interval: 30          # 死活監視間隔(秒)。最小 5
+  connect_timeout: 10         # SSH 接続タイムアウト(秒)
+  retry_initial: 5            # 再接続の初回待ち時間(秒)
+  retry_max: 300              # 再接続待ち時間の上限(秒)
+  retry_limit: 0              # 連続失敗の上限回数。0 は無制限
+  server_alive_interval: 15   # SSH keepalive 間隔(秒)
+  server_alive_count_max: 3   # keepalive 応答なし許容回数
+  # log_file: ~/.local/state/port-forwarder/port-forwarder.log  # 未指定なら標準出力
+
+# エントリ定義。キーがエントリ名 ([A-Za-z0-9._-]{1,32}) で一意
+entries:
+  example:
+    description: example tunnel     # 任意: 一覧表示に出る説明
+    host: bastion.example.com       # 必須: SSH 接続先ホスト
+    # user: your-name               # 任意: 既定は $USER
+    # port: 22                      # 任意: SSH ポート。既定 22
+    # identity: ~/.ssh/id_ed25519   # 任意: 秘密鍵
+    local_port: 18080               # 必須: ローカル待ち受けポート
+    remote_host: localhost          # 任意: 踏み台から見た転送先。既定 localhost
+    remote_port: 80                 # 必須: 転送先ポート
+    # bind_address: 127.0.0.1       # 任意: 既定 127.0.0.1
+    enabled: false                  # 任意: 既定 true
+    check_mode: remote              # 任意: process | tcp | remote。既定 remote
+    # ssh_options:                  # 任意: 追加の ssh -o 指定
+    #   - Compression=yes
+PFWD_CONFIG_TEMPLATE
+  chmod 600 "$PATH_" 2>/dev/null
+  printf 'Created: %s\n' "$PATH_"
+  printf "Edit the file and run '%s test' to validate.\n" "$__SCRIPT_NAME"
+  return 0
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
 #- usage / help ----------------------------------------------------------------
 #{{{
 _show_usage() { #{{{
@@ -662,6 +1118,62 @@ PFWD_HELP
 #-------------------------------------------------------------------------------
 #- subcommand functions --------------------------------------------------------
 #{{{
+# エントリの SSH 接続先表記 (user@host[:port])
+_ssh_label() { #{{{
+  local NAME=$1 U H P L
+  U=${_CFG[${NAME}.user]}
+  H=${_CFG[${NAME}.host]}
+  P=${_CFG[${NAME}.port]}
+  [[ -n "$U" ]] && L="${U}@${H}" || L=$H
+  [[ -n "$P" && "$P" != '22' ]] && L="${L}:${P}"
+  printf '%s\n' "$L"
+}
+#}}}
+
+_cmd_list() { #{{{
+  local NAME EN
+  _calc_name_width "${_CFG_NAMES[@]}"
+  printf '%-*s  %-7s  %-27s  %-15s  %s\n' \
+    "$_NAME_WIDTH" 'NAME' 'ENABLED' 'SSH' 'LOCAL' 'REMOTE'
+  for NAME in "${_CFG_NAMES[@]}"; do
+    if [[ "${_CFG[${NAME}.enabled]}" == 'false' ]]; then EN=no; else EN=yes; fi
+    printf '%-*s  %-7s  %-27s  %-15s  %s\n' \
+      "$_NAME_WIDTH" "$NAME" "$EN" \
+      "$(_truncate "$(_ssh_label "$NAME")" 26)" \
+      "${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]}" \
+      "${_CFG[${NAME}.remote_host]}:${_CFG[${NAME}.remote_port]}"
+  done
+  return 0
+}
+#}}}
+
+_cmd_config() { #{{{
+  local OPT TARGET F INIT='' FORCE=''
+  for OPT in "${_SUBCMD_OPTS[@]}"; do
+    case "$OPT" in
+      --init)  INIT=yes ;;
+      --force) FORCE=yes ;;
+      *)       _usage "unknown option for 'config': ${OPT}" ;;
+    esac
+  done
+  if [[ -n "$INIT" ]]; then
+    if [[ -n "$_OPT_CONFIG" ]]; then
+      TARGET=$(_expand_tilde "$_OPT_CONFIG")
+    else
+      TARGET=$(_config_user_path)
+    fi
+    _config_init "$TARGET" "$FORCE"
+    return 0
+  fi
+  _config_find
+  _config_file_list
+  for F in "${_CONFIG_FILES[@]}"; do
+    printf '%s\n' "$F"
+  done
+  return 0
+}
+#}}}
+
 _cmd_version() { #{{{
   printf '%s %s\n' "$__SCRIPT_NAME" "$_VERSION"
 }
@@ -770,6 +1282,12 @@ case "$_SUBCMD" in
     _cmd_version ;;
   help)
     _cmd_help "${_ARGS[0]}" ;;
+  config)
+    _cmd_config ;;
+  list)
+    _check_prerequisites
+    _config_setup
+    _cmd_list ;;
   *)
     _usage "unknown subcommand: ${_SUBCMD}" ;;
 esac

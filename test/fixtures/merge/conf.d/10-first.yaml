@@ -1,0 +1,7 @@
+global:
+  check_interval: 15
+entries:
+  extra-a:
+    host: a.example.com
+    local_port: 11111
+    remote_port: 80

@@ -1,0 +1,11 @@
+global:
+  connect_timeout: 20
+entries:
+  metrics:
+    host: new-bastion.example.com
+    local_port: 19090
+    remote_port: 9090
+  extra-b:
+    host: b.example.com
+    local_port: 22222
+    remote_port: 80

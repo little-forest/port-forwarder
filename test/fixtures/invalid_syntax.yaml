@@ -1,0 +1,4 @@
+entries:
+  db-prod:
+    host: bastion.example.com
+  broken: [

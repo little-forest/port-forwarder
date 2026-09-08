@@ -1,0 +1,13 @@
+entries:
+  db-prod:
+    host: bastion.example.com
+    local_port: 15432
+    remote_port: 5432
+  db-copy:
+    host: bastion.example.com
+    local_port: 15432
+    remote_port: 5433
+  other:
+    host: bastion.example.com
+    local_port: 15433
+    remote_port: 5432
