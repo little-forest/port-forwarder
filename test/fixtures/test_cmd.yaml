@@ -1,0 +1,12 @@
+global:
+  connect_timeout: 2
+entries:
+  unreachable:
+    host: 127.0.0.1
+    port: 1
+    user: nobody
+    local_port: 21998
+    remote_port: 80
+  broken:
+    host: 127.0.0.1
+    local_port: 21997

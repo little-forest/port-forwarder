@@ -233,3 +233,57 @@ reset_args() {
     [ "${ROW:$COL:1}" != ' ' ]
   done
 }
+
+# --- test サブコマンド --------------------------------------------------------
+
+@test "test: 設定ファイルのパスと 1 行 1 エントリの結果を出す" {
+  XDG_RUNTIME_DIR=$RUNTIME_ROOT run "$PFWD" --config "${FIXTURES}/test_cmd.yaml" --no-color test
+  [ "$status" -eq 4 ]
+  [[ "${lines[0]}" == "Config: ${FIXTURES}/test_cmd.yaml" ]]
+  [[ "$output" == *'[FAILED] unreachable'* ]]
+  [[ "$output" == *'ssh unreachable'* ]]
+  [[ "$output" == *'[FAILED] broken'* ]]
+  [[ "$output" == *"missing required key 'remote_port'"* ]]
+  [[ "${lines[-1]}" == '0 passed, 0 warning, 2 failed' ]]
+}
+
+@test "test: 名前を指定すると当該エントリだけを検査する" {
+  XDG_RUNTIME_DIR=$RUNTIME_ROOT run "$PFWD" --config "${FIXTURES}/test_cmd.yaml" --no-color test broken
+  [ "$status" -eq 4 ]
+  [[ "$output" != *'unreachable'* ]]
+  [[ "${lines[-1]}" == '0 passed, 0 warning, 1 failed' ]]
+}
+
+@test "test: 検証エラーの警告を二重に出さない" {
+  XDG_RUNTIME_DIR=$RUNTIME_ROOT run "$PFWD" --config "${FIXTURES}/test_cmd.yaml" --no-color test
+  [ "$(grep -c 'missing required key' <<<"$output")" -eq 1 ]
+}
+
+# --- install-service ----------------------------------------------------------
+
+@test "service: user unit の内容が DESIGN 5.10 に一致する" {
+  run _service_unit_text user '' '/usr/local/bin/pfwd daemon'
+  [[ "$output" == *'ExecStart=/usr/local/bin/pfwd daemon'* ]]
+  [[ "$output" == *'ExecReload=/bin/kill -HUP $MAINPID'* ]]
+  [[ "$output" == *'Restart=on-failure'* ]]
+  [[ "$output" == *'RestartSec=10'* ]]
+  [[ "$output" == *'KillMode=mixed'* ]]
+  [[ "$output" == *'After=network-online.target'* ]]
+  [[ "$output" == *'WantedBy=default.target'* ]]
+  [[ "$output" != *'User='* ]]
+}
+
+@test "service: system unit には User と multi-user.target が入る" {
+  run _service_unit_text system komori '/usr/local/bin/pfwd daemon'
+  [[ "$output" == *'User=komori'* ]]
+  [[ "$output" == *'WantedBy=multi-user.target'* ]]
+}
+
+@test "service: macOS では install-service / uninstall-service はエラーになる" {
+  [ "$(uname)" = 'Darwin' ] || skip 'macOS 以外では対象外'
+  run "$PFWD" --config "${FIXTURES}/basic.yaml" install-service
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Linux (systemd) only'* ]]
+  run "$PFWD" --config "${FIXTURES}/basic.yaml" uninstall-service
+  [ "$status" -eq 1 ]
+}

@@ -87,6 +87,7 @@ _TARGETS=()
 _WAIT_OK=0
 _WAIT_NG=0
 _DAEMON_PID=
+_TEST_ERR=
 
 # デーモン制御フラグ (DESIGN 5.7)
 _DAEMON_STARTED=0
@@ -2524,6 +2525,188 @@ PFWD_LOGS_HINT
 }
 #}}}
 
+# 接続テスト用の ssh 到達性確認 (フォワードは張らない / DESIGN 5.9)
+_test_ssh_reach() { #{{{
+  local NAME=$1 OUT RC OPT
+  local -a ARGS=(ssh -T
+    -o BatchMode=yes
+    -o NumberOfPasswordPrompts=0
+    -o StrictHostKeyChecking=yes
+    -o ConnectTimeout="${_GLOBAL[connect_timeout]}"
+    -p "${_CFG[${NAME}.port]}")
+  [[ -n "${_CFG[${NAME}.identity]}" ]] && ARGS+=(-o IdentitiesOnly=yes -i "${_CFG[${NAME}.identity]}")
+  [[ -n "${_CFG[${NAME}.user]}" ]] && ARGS+=(-l "${_CFG[${NAME}.user]}")
+  _entry_ssh_options "$NAME"
+  for OPT in "${_ENTRY_OPTS[@]}"; do
+    ARGS+=(-o "$OPT")
+  done
+  ARGS+=("${_CFG[${NAME}.host]}" true)
+  _debug2 "[${NAME}] exec: ${ARGS[*]}"
+  OUT=$("${ARGS[@]}" 2>&1 </dev/null)
+  RC=$?
+  if (( RC != 0 )); then
+    _TEST_ERR=$(_sanitize "$(printf '%s\n' "$OUT" | grep -v '^Warning: Permanently added' | tail -n 1)")
+    [[ -z "$_TEST_ERR" ]] && _TEST_ERR="ssh exited with status ${RC}"
+    return 1
+  fi
+  _TEST_ERR=
+  return 0
+}
+#}}}
+
+_cmd_test() { #{{{
+  local NAME PASS=0 WARN=0 FAIL=0 NOTE ADDR PORT
+  printf 'Config: %s\n' "$_CONFIG_FILE"
+  local F
+  for F in "${_CONFIG_FILES[@]:1}"; do
+    printf '        %s\n' "$F"
+  done
+  printf '\n'
+  _resolve_names
+  _calc_name_width "${_TARGETS[@]}"
+  for NAME in "${_TARGETS[@]}"; do
+    if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
+      _show_result FAILED "$NAME" "${_CFG_INVALID[$NAME]}"
+      FAIL=$(( FAIL + 1 ))
+      continue
+    fi
+    _state_load "$NAME"
+    if ! _test_ssh_reach "$NAME"; then
+      _show_result FAILED "$NAME" "config valid, ssh unreachable: ${_TEST_ERR}"
+      FAIL=$(( FAIL + 1 ))
+      continue
+    fi
+    ADDR=$(_probe_addr "$NAME")
+    PORT=${_CFG[${NAME}.local_port]}
+    if _is_port_free "$ADDR" "$PORT"; then
+      _show_result OK "$NAME" 'config valid, ssh reachable, local port free'
+      PASS=$(( PASS + 1 ))
+    else
+      NOTE="config valid, ssh reachable, local port ${PORT} already in use"
+      if [[ "${_ST[${NAME}.status]}" == 'connected' ]]; then
+        NOTE="${NOTE} (by this entry)"
+      fi
+      _show_result WARN "$NAME" "$NOTE"
+      WARN=$(( WARN + 1 ))
+    fi
+  done
+  printf '\n%d passed, %d warning, %d failed\n' "$PASS" "$WARN" "$FAIL"
+  (( FAIL > 0 )) && return "$_EXIT_CONNECT"
+  return 0
+}
+#}}}
+
+# systemd unit の内容を生成する (DESIGN 5.10)
+_service_unit_text() { #{{{
+  local SCOPE=$1 RUN_AS=$2 EXEC=$3
+  cat <<PFWD_UNIT
+[Unit]
+Description=port-forwarder: persistent SSH port forwarding
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${EXEC}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
+PFWD_UNIT
+  [[ "$SCOPE" == 'system' && -n "$RUN_AS" ]] && printf 'User=%s\n' "$RUN_AS"
+  printf '\n[Install]\n'
+  if [[ "$SCOPE" == 'system' ]]; then
+    printf 'WantedBy=multi-user.target\n'
+  else
+    printf 'WantedBy=default.target\n'
+  fi
+  return 0
+}
+#}}}
+
+_cmd_install_service() { #{{{
+  local OPT SCOPE=user RUN_AS='' NOW='' I UNIT_DIR UNIT EXEC
+  local -a SYSTEMCTL=()
+  if [[ "$(uname)" == 'Darwin' ]]; then
+    _error_exit "$_EXIT_ERROR" "install-service is Linux (systemd) only. On macOS, run '${__SCRIPT_NAME} up' instead (SPECS 9)."
+  fi
+  for (( I = 0; I < ${#_SUBCMD_OPTS[@]}; I++ )); do
+    OPT=${_SUBCMD_OPTS[$I]}
+    case "$OPT" in
+      --user)     SCOPE=user ;;
+      --system)   SCOPE=system ;;
+      --now)      NOW=yes ;;
+      --run-as)   I=$(( I + 1 )); RUN_AS=${_SUBCMD_OPTS[$I]} ;;
+      --run-as=*) RUN_AS=${OPT#*=} ;;
+      *)          _usage "unknown option for 'install-service': ${OPT}" ;;
+    esac
+  done
+
+  EXEC="$(_self_path) "
+  [[ -n "$_OPT_CONFIG" ]] && EXEC="${EXEC}--config ${_CONFIG_FILE} "
+  EXEC="${EXEC}daemon"
+
+  if [[ "$SCOPE" == 'system' ]]; then
+    UNIT_DIR=/etc/systemd/system
+    SYSTEMCTL=(systemctl)
+    [[ -z "$RUN_AS" ]] && __show_warn 'no --run-as given; the daemon will run as root (not recommended)'
+  else
+    UNIT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+    SYSTEMCTL=(systemctl --user)
+  fi
+  UNIT="${UNIT_DIR}/port-forwarder.service"
+  if [[ ! -d "$UNIT_DIR" ]] && ! mkdir -p "$UNIT_DIR" 2>/dev/null; then
+    _error_exit "$_EXIT_ERROR" "cannot create the unit directory: ${UNIT_DIR}"
+  fi
+  _service_unit_text "$SCOPE" "$RUN_AS" "$EXEC" > "$UNIT" \
+    || _error_exit "$_EXIT_ERROR" "cannot write the unit file: ${UNIT}"
+  printf 'Generated: %s\n' "$UNIT"
+
+  if [[ -n "$NOW" ]]; then
+    "${SYSTEMCTL[@]}" daemon-reload || _error_exit "$_EXIT_ERROR" 'systemctl daemon-reload failed'
+    "${SYSTEMCTL[@]}" enable --now port-forwarder || _error_exit "$_EXIT_ERROR" 'systemctl enable --now failed'
+    printf 'Enabled and started: port-forwarder\n'
+    return 0
+  fi
+  printf 'Run the following to enable:\n'
+  printf '  %s daemon-reload\n' "${SYSTEMCTL[*]}"
+  printf '  %s enable --now port-forwarder\n' "${SYSTEMCTL[*]}"
+  [[ "$SCOPE" == 'user' ]] && printf '  loginctl enable-linger %s    # to keep it running after logout\n' "${USER:-$(id -un)}"
+  return 0
+}
+#}}}
+
+_cmd_uninstall_service() { #{{{
+  local OPT SCOPE=user UNIT_DIR UNIT
+  local -a SYSTEMCTL=()
+  if [[ "$(uname)" == 'Darwin' ]]; then
+    _error_exit "$_EXIT_ERROR" "uninstall-service is Linux (systemd) only."
+  fi
+  for OPT in "${_SUBCMD_OPTS[@]}"; do
+    case "$OPT" in
+      --user)   SCOPE=user ;;
+      --system) SCOPE=system ;;
+      *)        _usage "unknown option for 'uninstall-service': ${OPT}" ;;
+    esac
+  done
+  if [[ "$SCOPE" == 'system' ]]; then
+    UNIT_DIR=/etc/systemd/system
+    SYSTEMCTL=(systemctl)
+  else
+    UNIT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+    SYSTEMCTL=(systemctl --user)
+  fi
+  UNIT="${UNIT_DIR}/port-forwarder.service"
+  [[ -f "$UNIT" ]] || _error_exit "$_EXIT_ERROR" "unit file not found: ${UNIT}"
+  "${SYSTEMCTL[@]}" disable --now port-forwarder >/dev/null 2>&1
+  rm -f "$UNIT" || _error_exit "$_EXIT_ERROR" "cannot remove the unit file: ${UNIT}"
+  "${SYSTEMCTL[@]}" daemon-reload >/dev/null 2>&1
+  printf 'Removed: %s\n' "$UNIT"
+  return 0
+}
+#}}}
+
 _cmd_daemon() { #{{{
   _daemon_main
 }
@@ -2689,6 +2872,20 @@ case "$_SUBCMD" in
     _config_setup
     _setup_runtime_dir
     _cmd_logs ;;
+  test)
+    _check_prerequisites
+    # 検証結果は test 自身が 1 行ずつ表示するため、読み込み時の警告は抑止する
+    _NO_CFG_WARN=yes
+    _config_setup
+    _NO_CFG_WARN=
+    _setup_runtime_dir
+    _cmd_test ;;
+  install-service)
+    _check_prerequisites
+    _config_setup
+    _cmd_install_service ;;
+  uninstall-service)
+    _cmd_uninstall_service ;;
   *)
     _usage "unknown subcommand: ${_SUBCMD}" ;;
 esac
