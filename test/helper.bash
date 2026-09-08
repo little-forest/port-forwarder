@@ -60,3 +60,50 @@ load_config() {
   _config_validate
   return 0
 }
+
+# 空きポートを 1 つ返す
+free_port() {
+  local P I
+  for (( I = 0; I < 100; I++ )); do
+    P=$(( 20000 + RANDOM % 10000 ))
+    if ! (exec 3<>"/dev/tcp/127.0.0.1/${P}") 2>/dev/null; then
+      printf '%s\n' "$P"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# プローブ検証用の TCP サーバを起動する
+#   start_probe_server <port> <hold|close|data>   -> PID を返す
+start_probe_server() {
+  local PORT=$1 MODE=$2 PID I
+  python3 -c '
+import socket, sys
+port, mode = int(sys.argv[1]), sys.argv[2]
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port))
+s.listen(8)
+held = []
+while True:
+    c, _ = s.accept()
+    if mode == "close":
+        c.close()
+    elif mode == "data":
+        c.sendall(b"x")
+        held.append(c)
+    else:
+        held.append(c)
+' "$PORT" "$MODE" >/dev/null 2>&1 &
+  PID=$!
+  for (( I = 0; I < 50; I++ )); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+      printf '%s\n' "$PID"
+      return 0
+    fi
+    sleep 0.1
+  done
+  kill "$PID" 2>/dev/null
+  return 1
+}

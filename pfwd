@@ -82,6 +82,7 @@ _HAVE_PRINTF_TIME=
 _PROBE_BACKEND=
 _NAME_WIDTH=10
 _SSH_ARGS=()
+_ENTRY_OPTS=()
 
 # デーモン制御フラグ (DESIGN 5.7)
 _SHUTDOWN=
@@ -784,6 +785,12 @@ _config_validate() { #{{{
       __show_warn "[${NAME}] bind_address ${V} exposes local port ${_CFG[${NAME}.local_port]} to other hosts"
     fi
 
+    # ssh_options で StrictHostKeyChecking を緩めた場合は警告する (DESIGN 9)
+    if [[ "${_CFG_OPTS[$NAME]}" == *'StrictHostKeyChecking=no'* \
+       || "${_CFG_OPTS[$NAME]}" == *'StrictHostKeyChecking=accept-new'* ]]; then
+      __show_warn "[${NAME}] ssh_options relaxes StrictHostKeyChecking; host keys will not be verified"
+    fi
+
     # 未知キー (警告のみ)
     for KEY in "${!_CFG[@]}"; do
       [[ "$KEY" == "${NAME}."* ]] || continue
@@ -1070,6 +1077,314 @@ _desired_get() { #{{{
 
 _desired_remove() { #{{{
   rm -f "${_RUN_DIR}/state/${1}.desired" 2>/dev/null
+  return 0
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- ssh session functions -------------------------------------------------------
+#{{{
+# ControlPath を決定する (DESIGN 3.3)
+_ctl_path() { #{{{
+  local NAME=$1 P BASE SUM
+  P="${_RUN_DIR}/ctl/${NAME}.sock"
+  if (( ${#P} > _CTL_PATH_MAX )); then
+    # UNIX ドメインソケットのパス長上限 (macOS 104 / Linux 108) を超えるため
+    # TMPDIR 配下の短いパスに退避する
+    BASE="${TMPDIR:-/tmp}/pfwd-${EUID}"
+    mkdir -p "$BASE" 2>/dev/null
+    chmod 700 "$BASE" 2>/dev/null
+    SUM=$(printf '%s' "$NAME" | cksum | awk '{print $1}')
+    P="${BASE}/${SUM}.sock"
+  fi
+  (( ${#P} > _CTL_PATH_MAX )) && return 1
+  printf '%s\n' "$P"
+  return 0
+}
+#}}}
+
+# 接続パラメータの署名 (DESIGN 4.6)
+_conn_sig() { #{{{
+  local NAME=$1
+  printf '%s\n' "${_CFG[${NAME}.host]}${_US}${_CFG[${NAME}.user]}${_US}${_CFG[${NAME}.port]}${_US}${_CFG[${NAME}.identity]}${_US}${_CFG[${NAME}.local_port]}${_US}${_CFG[${NAME}.remote_host]}${_US}${_CFG[${NAME}.remote_port]}${_US}${_CFG[${NAME}.bind_address]}${_US}${_CFG_OPTS[$NAME]}"
+}
+#}}}
+
+# エントリの ssh_options を配列に展開する
+_entry_ssh_options() { #{{{
+  local NAME=$1
+  _ENTRY_OPTS=()
+  [[ -z "${_CFG_OPTS[$NAME]}" ]] && return 0
+  IFS=$_US read -r -a _ENTRY_OPTS <<<"${_CFG_OPTS[$NAME]}"
+  return 0
+}
+#}}}
+
+# ssh の起動引数を _SSH_ARGS に組み立てる (DESIGN 5.5)
+_ssh_build_args() { #{{{
+  local NAME=$1 CTL=$2 OPT
+  _entry_ssh_options "$NAME"
+  _SSH_ARGS=(ssh -N -T -M -S "$CTL"
+    -o ControlMaster=yes
+    -o ControlPersist=no
+    -o ExitOnForwardFailure=yes
+    -o BatchMode=yes
+    -o NumberOfPasswordPrompts=0
+    -o StrictHostKeyChecking=yes
+    -o ConnectTimeout="${_GLOBAL[connect_timeout]}"
+    -o ServerAliveInterval="${_GLOBAL[server_alive_interval]}"
+    -o ServerAliveCountMax="${_GLOBAL[server_alive_count_max]}"
+    -p "${_CFG[${NAME}.port]}"
+    -L "${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]}:${_CFG[${NAME}.remote_host]}:${_CFG[${NAME}.remote_port]}")
+  [[ -n "${_CFG[${NAME}.identity]}" ]] && _SSH_ARGS+=(-o IdentitiesOnly=yes -i "${_CFG[${NAME}.identity]}")
+  [[ -n "${_CFG[${NAME}.user]}" ]] && _SSH_ARGS+=(-l "${_CFG[${NAME}.user]}")
+  # ユーザー指定の ssh_options は既定の後に置き、後勝ちで上書き可能とする
+  for OPT in "${_ENTRY_OPTS[@]}"; do
+    _SSH_ARGS+=(-o "$OPT")
+  done
+  _SSH_ARGS+=("${_CFG[${NAME}.host]}")
+  return 0
+}
+#}}}
+
+# ssh をバックグラウンド起動する。確立の完了は待たない (DESIGN 5.5)
+_ssh_start() { #{{{
+  local NAME=$1 CTL ERRF PID
+  if ! CTL=$(_ctl_path "$NAME"); then
+    _state_set "$NAME" last_error "ControlPath for '${NAME}' exceeds the socket path limit"
+    _log_error "$NAME" "ControlPath exceeds the socket path limit; cannot start"
+    _state_transit "$NAME" failed 'ControlPath too long'
+    return 1
+  fi
+  rm -f "$CTL" 2>/dev/null
+  ERRF="${_RUN_DIR}/err/${NAME}.err"
+  : > "$ERRF" 2>/dev/null
+  _ssh_build_args "$NAME" "$CTL"
+  _debug2 "[${NAME}] exec: ${_SSH_ARGS[*]}"
+  "${_SSH_ARGS[@]}" </dev/null >>"$ERRF" 2>&1 &
+  PID=$!
+  _state_set "$NAME" pid "$PID"
+  _state_set "$NAME" ctl "$CTL"
+  _state_set "$NAME" conn_sig "$(_conn_sig "$NAME")"
+  _state_set "$NAME" last_error ''
+  _state_transit "$NAME" connecting
+  _log_info "$NAME" "starting ssh (pid=${PID}, ${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]} -> ${_CFG[${NAME}.remote_host]}:${_CFG[${NAME}.remote_port]})"
+  return 0
+}
+#}}}
+
+# セッションが生きているか (ControlMaster を優先し、PID にフォールバックする)
+_ssh_is_alive() { #{{{
+  local NAME=$1 CTL PID
+  CTL=${_ST[${NAME}.ctl]}
+  PID=${_ST[${NAME}.pid]}
+  if [[ -n "$CTL" && -S "$CTL" ]]; then
+    ssh -O check -S "$CTL" -o BatchMode=yes "${_CFG[${NAME}.host]}" >/dev/null 2>&1
+    return $?
+  fi
+  [[ -n "$PID" && "$PID" != '0' ]] || return 1
+  kill -0 "$PID" 2>/dev/null
+}
+#}}}
+
+# セッションを確実に終了させる (DESIGN 5.5)
+_ssh_stop() { #{{{
+  local NAME=$1 CTL PID I
+  CTL=${_ST[${NAME}.ctl]}
+  PID=${_ST[${NAME}.pid]}
+
+  # 1. ControlMaster 経由の終了
+  if [[ -n "$CTL" && -S "$CTL" ]]; then
+    ssh -O exit -S "$CTL" -o BatchMode=yes "${_CFG[${NAME}.host]}" >/dev/null 2>&1
+    for (( I = 0; I < 20; I++ )); do
+      _ssh_pid_alive "$PID" || break
+      sleep 0.1
+    done
+  fi
+
+  # 2. SIGTERM
+  if _ssh_pid_alive "$PID"; then
+    kill -TERM "$PID" 2>/dev/null
+    for (( I = 0; I < 30; I++ )); do
+      _ssh_pid_alive "$PID" || break
+      sleep 0.1
+    done
+  fi
+
+  # 3. SIGKILL
+  if _ssh_pid_alive "$PID"; then
+    _log_warn "$NAME" "ssh (pid=${PID}) did not exit; sending SIGKILL"
+    kill -KILL "$PID" 2>/dev/null
+    sleep 0.1
+  fi
+
+  # 4. ソケットの後始末
+  [[ -n "$CTL" ]] && rm -f "$CTL" 2>/dev/null
+
+  # 5. PID を落とす
+  _state_set "$NAME" pid 0
+  return 0
+}
+#}}}
+
+_ssh_pid_alive() { #{{{
+  local PID=$1
+  [[ -n "$PID" && "$PID" != '0' ]] || return 1
+  kill -0 "$PID" 2>/dev/null
+}
+#}}}
+
+# ssh の標準エラー出力から直近の意味のある 1 行を取り出し、ファイルを切り詰める
+_ssh_take_error() { #{{{
+  local NAME=$1 F LINE MSG=
+  F="${_RUN_DIR}/err/${NAME}.err"
+  if [[ -f "$F" ]]; then
+    while IFS= read -r LINE; do
+      [[ -z "$LINE" ]] && continue
+      [[ "$LINE" == 'Warning: Permanently added'* ]] && continue
+      MSG=$LINE
+    done < "$F"
+    : > "$F" 2>/dev/null
+  fi
+  _sanitize "$MSG"
+  return 0
+}
+#}}}
+
+# ssh の失敗理由を分類する (DESIGN 7.4)。fatal はリトライしても成功しえないもの
+_ssh_classify_error() { #{{{
+  local MSG=$1
+  case "$MSG" in
+    *'Host key verification failed'*|*'host key is not known'*|*'HOST IDENTIFICATION HAS CHANGED'*)
+      printf 'fatal\n' ;;
+    *'Permission denied (publickey'*|*'Permission denied ('*)
+      printf 'fatal\n' ;;
+    *passphrase*|*Passphrase*)
+      printf 'fatal\n' ;;
+    *'Address already in use'*|*'cannot listen to port'*|*'bind: '*)
+      printf 'fatal\n' ;;
+    *)
+      printf 'retry\n' ;;
+  esac
+}
+#}}}
+
+# 失敗理由に応じた追加の案内 (SPECS 9.2 / 10 章)
+_ssh_error_hint() { #{{{
+  local NAME=$1 MSG=$2
+  case "$MSG" in
+    *passphrase*|*Passphrase*)
+      printf 'passphrase-protected key requires ssh-agent\n' ;;
+    *'Host key verification failed'*|*'host key is not known'*)
+      _err_unknown_host_key "$NAME" "${_CFG[${NAME}.host]}" ;;
+    *'Address already in use'*|*'cannot listen to port'*)
+      _err_port_in_use "$NAME" "${_CFG[${NAME}.local_port]}" ;;
+    *)
+      printf '\n' ;;
+  esac
+}
+#}}}
+#}}}
+
+#-------------------------------------------------------------------------------
+#- health check functions ------------------------------------------------------
+#{{{
+# 利用可能な TCP プローブ手段を判定する (DESIGN 5.6)
+_probe_detect() { #{{{
+  local OUT
+  OUT=$( (exec 3<>'/dev/tcp/127.0.0.1/1') 2>&1 )
+  if [[ "$OUT" != *'No such file or directory'* ]]; then
+    _PROBE_BACKEND=devtcp
+  elif command -v nc >/dev/null 2>&1; then
+    _PROBE_BACKEND=nc
+    _log_warn - "bash /dev/tcp is not available; check_mode 'remote' is degraded to 'tcp'"
+  else
+    _PROBE_BACKEND=none
+    _log_warn - "neither /dev/tcp nor nc is available; check_mode is degraded to 'process'"
+  fi
+  _debug "probe backend: ${_PROBE_BACKEND}"
+  return 0
+}
+#}}}
+
+# TCP 接続の可否のみを判定する (0=接続可 / 1=接続不可 / 2=判定不能)
+_probe_tcp() { #{{{
+  local ADDR=$1 PORT=$2
+  [[ -z "$_PROBE_BACKEND" ]] && _probe_detect
+  case "$_PROBE_BACKEND" in
+    devtcp)
+      exec 3<>"/dev/tcp/${ADDR}/${PORT}" 2>/dev/null || return 1
+      exec 3<&- 3>&-
+      return 0 ;;
+    nc)
+      nc -z -w "$_CHECK_TIMEOUT" "$ADDR" "$PORT" >/dev/null 2>&1 || return 1
+      return 0 ;;
+    *)
+      return 2 ;;
+  esac
+}
+#}}}
+
+# 転送が成立しているかを判定する (0=成立 / 1=即切断 / 2=接続不可)
+# ローカルフォワードは転送先へのチャネルを開けないと接続を即座に閉じる。
+_probe_forward() { #{{{
+  local ADDR=$1 PORT=$2 RC DUMMY
+  exec 3<>"/dev/tcp/${ADDR}/${PORT}" 2>/dev/null || return 2
+  # 受信内容は使わない (到達判定のみ)
+  # shellcheck disable=SC2034
+  read -r -t "$_REMOTE_PROBE_WAIT" -N 1 -u 3 DUMMY
+  RC=$?
+  exec 3<&- 3>&-
+  (( RC == 0 ))  && return 0    # データを受信した = 転送先まで到達している
+  (( RC > 128 )) && return 0    # 待機タイムアウト = 接続が維持されている
+  return 1                      # EOF = 転送先へ届かず即切断された
+}
+#}}}
+
+# ローカルポートが空いているか (0=空き / 1=使用中)
+_is_port_free() { #{{{
+  local ADDR=$1 PORT=$2
+  _probe_tcp "$ADDR" "$PORT"
+  case $? in
+    0) return 1 ;;   # 接続できた = 使用中
+    1) return 0 ;;   # 接続できない = 空き
+    *) return 0 ;;   # 判定不能な場合は空きとみなす
+  esac
+}
+#}}}
+
+# check_mode に応じた死活監視 (0=正常 / 1=異常)
+_health_check() { #{{{
+  local NAME=$1 MODE ADDR PORT RC
+  MODE=${_CFG[${NAME}.check_mode]}
+  ADDR=${_CFG[${NAME}.bind_address]}
+  PORT=${_CFG[${NAME}.local_port]}
+  [[ "$ADDR" == '0.0.0.0' || "$ADDR" == '::' ]] && ADDR=127.0.0.1
+  [[ -z "$_PROBE_BACKEND" ]] && _probe_detect
+
+  _ssh_is_alive "$NAME" || return 1
+  case "$MODE" in
+    process)
+      return 0 ;;
+    tcp)
+      _probe_tcp "$ADDR" "$PORT"
+      RC=$?
+      (( RC == 0 )) && return 0
+      (( RC == 2 )) && return 0   # 判定不能なら process 相当に劣化する
+      return 1 ;;
+    remote)
+      if [[ "$_PROBE_BACKEND" == 'devtcp' ]]; then
+        _probe_forward "$ADDR" "$PORT" && return 0
+        return 1
+      fi
+      # /dev/tcp が使えない場合は tcp 相当に劣化する
+      _probe_tcp "$ADDR" "$PORT"
+      RC=$?
+      (( RC == 0 )) && return 0
+      (( RC == 2 )) && return 0
+      return 1 ;;
+  esac
   return 0
 }
 #}}}
