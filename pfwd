@@ -8,10 +8,10 @@
 # shellcheck disable=SC2006
 
 #- bash version check ----------------------------------------------------------
-# 連想配列を使うため bash 4 系が必須 (DESIGN 1.1 / 7.2)。
-# グローバル宣言に declare -g を使う (bats から関数内で source されても
-# グローバルに宣言されるようにするため) 都合上、下限は 4.2 とする。
-# 後続の declare より前に判定する必要があるため、関数化せずここで実行する。
+# bash 4.x is required because associative arrays are used (DESIGN 1.1 / 7.2).
+# declare -g is used for global declarations (so that they are declared globally
+# even when sourced from inside a function by bats), so the minimum is 4.2.
+# The check must run before the declare statements below, so it is done here, not in a function.
 if [[ -z "${BASH_VERSINFO[0]}" ]] \
   || (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2 ) )); then
   echo "[ ERROR ] bash 4.2 or later is required (current: ${BASH_VERSION:-unknown}). On macOS: brew install bash" >&2
@@ -30,7 +30,7 @@ __SILENT=
 #{{{
 _VERSION='1.0.0'
 
-# 終了コード (SPECS 7 章)
+# exit codes (SPECS chapter 7)
 _EXIT_OK=0
 _EXIT_ERROR=1
 _EXIT_USAGE=2
@@ -40,15 +40,15 @@ _EXIT_NO_DAEMON=5
 _EXIT_RUNNING=6
 _EXIT_DEPS=7
 
-# 内部定数 (DESIGN 1.2)
-_US=$'\x1f'                 # 配列要素の区切り (Unit Separator)
-_CHECK_TIMEOUT=3            # TCP プローブのタイムアウト(秒)
-_REMOTE_PROBE_WAIT=1.0      # remote プローブの待機時間(秒)
-_MAX_CHECKS_PER_TICK=20     # 1 サイクルあたりの死活監視実行数の上限
-_MIN_CHECK_INTERVAL=5       # check_interval の下限 (SPECS 4.3)
-_CTL_PATH_MAX=100           # ControlPath の長さ上限(バイト)
+# internal constants (DESIGN 1.2)
+_US=$'\x1f'                 # array element delimiter (Unit Separator)
+_CHECK_TIMEOUT=3            # TCP probe timeout (sec)
+_REMOTE_PROBE_WAIT=1.0      # remote probe wait time (sec)
+_MAX_CHECKS_PER_TICK=20     # max health checks per cycle
+_MIN_CHECK_INTERVAL=5       # lower bound of check_interval (SPECS 4.3)
+_CTL_PATH_MAX=100           # max ControlPath length (bytes)
 
-# 共通オプション
+# common options
 _OPT_CONFIG=
 _OPT_HELP=
 _OPT_VERSION=
@@ -61,7 +61,7 @@ _SUBCMD_GIVEN=
 _ARGS=()
 _SUBCMD_OPTS=()
 
-# 設定 (DESIGN 4.1)
+# config (DESIGN 4.1)
 _CONFIG_FILE=
 _CONFIG_FILES=()
 _CFG_NAMES=()
@@ -71,11 +71,11 @@ declare -gA _GLOBAL=()
 declare -gA _CFG_INVALID=()
 declare -gA _CFG_SOURCE=()
 
-# 状態 (DESIGN 4.4)
+# state (DESIGN 4.4)
 declare -gA _ST=()
 declare -gA _ST_DIRTY=()
 
-# 実行時
+# runtime
 _RUN_DIR=
 _LOG_FILE=
 _HAVE_PRINTF_TIME=
@@ -89,13 +89,13 @@ _WAIT_NG=0
 _DAEMON_PID=
 _TEST_ERR=
 
-# デーモン制御フラグ (DESIGN 5.7)
+# daemon control flags (DESIGN 5.7)
 _DAEMON_STARTED=0
 _SHUTDOWN=
 _FLAG_HUP=0
 _FLAG_USR1=0
 
-# 色 (__setup_color で eval により設定される)
+# colors (assigned via eval in __setup_color)
 C_OFF=
 C_GREEN=
 C_YELLOW=
@@ -182,7 +182,7 @@ __get_tmp_base() { #{{{
 }
 #}}}
 
-# shellcheck disable=SC2120  # 引数 -d は任意 (template.sh 由来)
+# shellcheck disable=SC2120  # the -d argument is optional (comes from template.sh)
 __make_tmp() { #{{{
   local TMP_BASE
   TMP_BASE=`__get_tmp_base`
@@ -207,7 +207,7 @@ __script_end_clean_tmp() { #{{{
 #-------------------------------------------------------------------------------
 #- utility functions -----------------------------------------------------------
 #{{{
-# 現在時刻を epoch 秒で返す
+# return the current time in epoch seconds
 _now() { #{{{
   if [[ -z "$_HAVE_PRINTF_TIME" ]]; then
     if printf '%(%s)T' -1 >/dev/null 2>&1; then _HAVE_PRINTF_TIME=yes; else _HAVE_PRINTF_TIME=no; fi
@@ -220,7 +220,7 @@ _now() { #{{{
 }
 #}}}
 
-# ログ用のタイムスタンプ (SPECS 6.5)
+# timestamp for log output (SPECS 6.5)
 _timestamp() { #{{{
   if [[ -z "$_HAVE_PRINTF_TIME" ]]; then
     if printf '%(%s)T' -1 >/dev/null 2>&1; then _HAVE_PRINTF_TIME=yes; else _HAVE_PRINTF_TIME=no; fi
@@ -233,7 +233,7 @@ _timestamp() { #{{{
 }
 #}}}
 
-# 経過秒数を "2d 04:11" / "05:22" 形式に整形する (SPECS 6.1)
+# format elapsed seconds as "2d 04:11" / "05:22" (SPECS 6.1)
 _fmt_uptime() { #{{{
   local SEC=$1 D H M
   [[ ! "$SEC" =~ ^[0-9]+$ ]] && { printf '%s\n' '-'; return; }
@@ -248,7 +248,7 @@ _fmt_uptime() { #{{{
 }
 #}}}
 
-# 先頭の ~ を $HOME に展開する
+# expand a leading ~ to $HOME
 _expand_tilde() { #{{{
   local P=$1
   if [[ "${P:0:1}" == '~' ]]; then
@@ -262,7 +262,7 @@ _expand_tilde() { #{{{
 }
 #}}}
 
-# 配列に値が含まれるか
+# whether an array contains a value
 _in_array() { #{{{
   local NEEDLE=$1 V
   shift
@@ -273,7 +273,7 @@ _in_array() { #{{{
 }
 #}}}
 
-# 幅を超える文字列を末尾 ... で切り詰める (SPECS 6.2)
+# truncate a string wider than the given width with a trailing ... (SPECS 6.2)
 _truncate() { #{{{
   local S=$1 W=$2
   if (( ${#S} > W )); then
@@ -284,11 +284,11 @@ _truncate() { #{{{
 }
 #}}}
 
-# 制御文字を空白に置換し、256 バイトで打ち切る (DESIGN 9)
+# replace control characters with spaces and cut the string off at 256 bytes (DESIGN 9)
 _sanitize() { #{{{
   local S=$*
   S=${S//[[:cntrl:]]/ }
-  # 前後の空白を落とす
+  # strip leading and trailing whitespace
   S=${S#"${S%%[![:space:]]*}"}
   S=${S%"${S##*[![:space:]]}"}
   (( ${#S} > 256 )) && S=${S:0:256}
@@ -296,7 +296,7 @@ _sanitize() { #{{{
 }
 #}}}
 
-# 誤入力に最も近いエントリ名を返す (距離 3 以下)
+# return the entry name closest to a typo (distance 3 or less)
 _suggest_name() { #{{{
   local TARGET=$1
   (( ${#_CFG_NAMES[@]} == 0 )) && return 0
@@ -321,7 +321,7 @@ _suggest_name() { #{{{
 }
 #}}}
 
-# 終了コードを伴うエラー終了 (DESIGN 7.1)
+# abort with an error message and an exit code (DESIGN 7.1)
 _error_exit() { #{{{
   local CODE=$1
   shift
@@ -330,7 +330,7 @@ _error_exit() { #{{{
 }
 #}}}
 
-# 実行結果を 1 行で表示する (DESIGN 2.3)
+# print the result of an operation on a single line (DESIGN 2.3)
 _show_result() { #{{{
   local RESULT=$1 NAME=$2
   shift 2
@@ -347,7 +347,7 @@ _show_result() { #{{{
 }
 #}}}
 
-# 対象エントリ名の最大長から表示幅を決める
+# determine the display width from the longest target entry name
 _calc_name_width() { #{{{
   local N W=10
   for N in "$@"; do
@@ -361,7 +361,7 @@ _calc_name_width() { #{{{
 #-------------------------------------------------------------------------------
 #- logging functions -----------------------------------------------------------
 #{{{
-# ログ出力先を決定する。書き込めない場合は標準出力にフォールバックする
+# determine the log destination; fall back to stdout when it is not writable
 _log_init() { #{{{
   local F D
   F=${_GLOBAL[log_file]}
@@ -410,7 +410,7 @@ _log_info()  { _log 'INFO'  "$@"; }
 _log_warn()  { _log 'WARN'  "$@"; }
 _log_error() { _log 'ERROR' "$@"; }
 
-# -v / -vv 指定時のみ標準エラー出力に出す (SPECS 3.2)
+# print to stderr only when -v / -vv is given (SPECS 3.2)
 _debug() { #{{{
   (( _VERBOSE >= 1 )) || return 0
   printf '%s [DEBUG] %s\n' "$(_timestamp)" "$(_sanitize "$*")" >&2
@@ -429,7 +429,7 @@ _debug2() { #{{{
 #-------------------------------------------------------------------------------
 #- error message functions -----------------------------------------------------
 #{{{
-# SPECS 10 章のメッセージをここに集約する (DESIGN 7.3)
+# the messages of SPECS chapter 10 are collected here (DESIGN 7.3)
 _err_no_config()       { echo "config file not found. Run '${__SCRIPT_NAME} config --init' to create one at $1"; }
 _err_parse_failed()    { echo "failed to parse $1: $2"; }
 _err_no_entries()      { echo "$1 has no valid entries. 'entries' must be a non-empty map."; }
@@ -458,17 +458,17 @@ _err_no_entry()        { #{{{
 #-------------------------------------------------------------------------------
 #- config functions ------------------------------------------------------------
 #{{{
-# 既知キー (未知キーは警告のみ / SPECS 4.4)
+# known keys (unknown keys only produce a warning / SPECS 4.4)
 _KNOWN_ENTRY_KEYS=(description host user port identity local_port remote_host \
                    remote_port bind_address enabled check_mode check_interval ssh_options)
 _KNOWN_GLOBAL_KEYS=(check_interval connect_timeout retry_initial retry_max retry_limit \
                     server_alive_interval server_alive_count_max log_file)
-# yq の標準エラー出力を受けるファイル (遅延生成)
+# file that receives yq's stderr (created lazily)
 _YQ_ERR_FILE=
-# 検証結果の警告表示を抑止する (test サブコマンドが自前で表示するため)
+# suppress validation warnings (the test subcommand prints them itself)
 _NO_CFG_WARN=
 
-# ユーザー設定ファイルの既定パス (SPECS 4.1)
+# default path of the user config file (SPECS 4.1)
 _config_user_path() { #{{{
   if [[ -n "$XDG_CONFIG_HOME" ]]; then
     printf '%s\n' "${XDG_CONFIG_HOME}/port-forwarder/config.yaml"
@@ -478,7 +478,7 @@ _config_user_path() { #{{{
 }
 #}}}
 
-# 使用する設定ファイルを決定する (SPECS 4.1)
+# determine which config file to use (SPECS 4.1)
 _config_find() { #{{{
   local P
   if [[ -n "$_OPT_CONFIG" ]]; then
@@ -500,7 +500,7 @@ _config_find() { #{{{
 }
 #}}}
 
-# メイン設定 + conf.d/*.yaml|yml を名前順に並べる (SPECS 4.1)
+# list the main config plus conf.d/*.yaml|yml sorted by name (SPECS 4.1)
 _config_file_list() { #{{{
   local DIR CONFD F
   _CONFIG_FILES=("$_CONFIG_FILE")
@@ -520,7 +520,7 @@ _config_file_list() { #{{{
 }
 #}}}
 
-# エントリの既存キーをすべて削除する (エントリ単位の置換 / DESIGN 4.1)
+# drop all existing keys of an entry (replacement is per entry / DESIGN 4.1)
 _config_purge_entry() { #{{{
   local NAME=$1 K
   for K in "${!_CFG[@]}"; do
@@ -532,7 +532,7 @@ _config_purge_entry() { #{{{
 }
 #}}}
 
-# エントリを無効化する (該当エントリのみ無効 / SPECS 4.4)
+# disable an entry (only that entry becomes invalid / SPECS 4.4)
 _config_invalidate() { #{{{
   local NAME=$1
   shift
@@ -549,10 +549,10 @@ _is_port() { #{{{
 }
 #}}}
 
-# ls -ln の 1 列目からパーミッションを 8 進数で得る (stat の OS 差異を避ける)
+# get permissions in octal from the first column of ls -ln (avoids stat's OS differences)
 _file_mode_octal() { #{{{
   local F=$1 LINE M I DIGIT RES=
-  # stat のオプション差異 (GNU / BSD) を避けるため ls -ln をパースする (DESIGN 4.3)
+  # parse ls -ln to avoid the option differences of stat (GNU / BSD) (DESIGN 4.3)
   # shellcheck disable=SC2012
   LINE=$(ls -ln "$F" 2>/dev/null | head -1)
   [[ -z "$LINE" ]] && return 1
@@ -571,7 +571,7 @@ _file_mode_octal() { #{{{
 }
 #}}}
 
-# 設定ファイル 1 つを読み込む (DESIGN 4.1 の yq クエリ 0〜4)
+# load a single config file (yq queries 0-4 of DESIGN 4.1)
 _config_parse_file() { #{{{
   local FILE=$1
   local TAG NAME KEY VAL OPT LINE TABS RC
@@ -579,7 +579,7 @@ _config_parse_file() { #{{{
   # shellcheck disable=SC2119
   [[ -z "$_YQ_ERR_FILE" ]] && _YQ_ERR_FILE=$(__make_tmp)
 
-  # 0. 構造検証
+  # 0. structure validation
   TAG=$(yq -r '.entries | tag' "$FILE" 2>"$_YQ_ERR_FILE")
   RC=$?
   if (( RC != 0 )); then
@@ -589,7 +589,7 @@ _config_parse_file() { #{{{
     _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "'entries' must be a map (got ${TAG})")"
   fi
 
-  # 1. エントリ名 (記述順) と値の型
+  # 1. entry names (in order of appearance) and value types
   while IFS=$'\t' read -r NAME TAG; do
     [[ -z "$NAME" ]] && continue
     if [[ -n "${_CFG_SOURCE[$NAME]}" ]]; then
@@ -603,21 +603,21 @@ _config_parse_file() { #{{{
     fi
   done < <(yq -r '.entries // {} | to_entries[] | [.key, (.value | tag)] | @tsv' "$FILE" 2>/dev/null)
 
-  # 2. global (キー単位の後勝ち)
+  # 2. global (last one wins, per key)
   while IFS=$'\t' read -r KEY VAL; do
     [[ -z "$KEY" ]] && continue
     [[ "$VAL" == 'null' ]] && VAL=
     _GLOBAL[$KEY]=$VAL
   done < <(yq -r '.global // {} | to_entries[] | [.key, .value] | @tsv' "$FILE" 2>/dev/null)
 
-  # 3. エントリのスカラー値 ($n は yq のクエリ内変数のためシングルクォートのままとする)
+  # 3. scalar values of an entry ($n is a variable inside the yq query, so keep the single quotes)
   # shellcheck disable=SC2016
   while IFS= read -r LINE; do
     [[ -z "$LINE" ]] && continue
     TABS=${LINE//[^$'\t']/}
     IFS=$'\t' read -r NAME KEY VAL <<<"$LINE"
     if (( ${#TABS} != 2 )); then
-      # 値にタブが含まれ列がずれた場合は当該エントリを無効化する
+      # disable the entry when a value contains a tab and shifts the columns
       _config_invalidate "$NAME" "value of '${KEY}' contains a tab character"
       continue
     fi
@@ -630,7 +630,7 @@ _config_parse_file() { #{{{
                  | select((.value | tag) != "!!seq" and (.value | tag) != "!!map")
                  | [$n, .key, .value] | @tsv' "$FILE" 2>/dev/null)
 
-  # 4. ssh_options (配列。$n は yq のクエリ内変数)
+  # 4. ssh_options (an array; $n is a variable inside the yq query)
   # shellcheck disable=SC2016
   while IFS=$'\t' read -r NAME OPT; do
     [[ -z "$NAME" ]] && continue
@@ -652,7 +652,7 @@ _config_parse_file() { #{{{
 }
 #}}}
 
-# 既定値を埋める (SPECS 4.3 / DESIGN 4.2)
+# fill in the default values (SPECS 4.3 / DESIGN 4.2)
 _config_apply_defaults() { #{{{
   local NAME KEY V
   local -A GDEF=(
@@ -694,7 +694,7 @@ _config_apply_defaults() { #{{{
 }
 #}}}
 
-# 真偽値表記を true / false に正規化する
+# normalize boolean notations to true / false
 _normalize_bool() { #{{{
   local V=$1
   case "${V,,}" in
@@ -706,7 +706,7 @@ _normalize_bool() { #{{{
 }
 #}}}
 
-# 設定の検証 (SPECS 4.4 / DESIGN 4.3)
+# validate the configuration (SPECS 4.4 / DESIGN 4.3)
 _config_validate() { #{{{
   local NAME KEY V SUF OTHER PKEY MODE
   local -A SEEN_PORT=()
@@ -719,7 +719,7 @@ _config_validate() { #{{{
       continue
     fi
 
-    # 必須キー
+    # required keys
     local BAD=
     for KEY in host local_port remote_port; do
       if [[ -z "${_CFG[${NAME}.${KEY}]}" ]]; then
@@ -730,7 +730,7 @@ _config_validate() { #{{{
     done
     [[ -n "$BAD" ]] && continue
 
-    # ポート範囲
+    # port range
     for KEY in local_port remote_port port; do
       V=${_CFG[${NAME}.${KEY}]}
       if ! _is_port "$V"; then
@@ -741,7 +741,7 @@ _config_validate() { #{{{
     done
     [[ -n "$BAD" ]] && continue
 
-    # local_port の重複 (重複したら両方を無効化する)
+    # duplicate local_port (disable both entries on a duplicate)
     PKEY="${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]}"
     if [[ -n "${SEEN_PORT[$PKEY]}" ]]; then
       OTHER=${SEEN_PORT[$PKEY]}
@@ -752,7 +752,7 @@ _config_validate() { #{{{
     fi
     SEEN_PORT[$PKEY]=$NAME
 
-    # identity の存在と権限
+    # existence and permissions of identity
     V=${_CFG[${NAME}.identity]}
     if [[ -n "$V" ]]; then
       if [[ ! -f "$V" ]]; then
@@ -774,7 +774,7 @@ _config_validate() { #{{{
       continue
     fi
 
-    # enabled の正規化
+    # normalize enabled
     if ! V=$(_normalize_bool "${_CFG[${NAME}.enabled]}"); then
       _config_invalidate "$NAME" "[${NAME}] invalid enabled value '${_CFG[${NAME}.enabled]}'"
       continue
@@ -788,19 +788,19 @@ _config_validate() { #{{{
       continue
     fi
 
-    # bind_address の安全性 (SPECS 11 章)
+    # safety of bind_address (SPECS chapter 11)
     V=${_CFG[${NAME}.bind_address]}
     if [[ "$V" == '0.0.0.0' || "$V" == '::' ]]; then
       __show_warn "[${NAME}] bind_address ${V} exposes local port ${_CFG[${NAME}.local_port]} to other hosts"
     fi
 
-    # ssh_options で StrictHostKeyChecking を緩めた場合は警告する (DESIGN 9)
+    # warn when ssh_options relaxes StrictHostKeyChecking (DESIGN 9)
     if [[ "${_CFG_OPTS[$NAME]}" == *'StrictHostKeyChecking=no'* \
        || "${_CFG_OPTS[$NAME]}" == *'StrictHostKeyChecking=accept-new'* ]]; then
       __show_warn "[${NAME}] ssh_options relaxes StrictHostKeyChecking; host keys will not be verified"
     fi
 
-    # 未知キー (警告のみ)
+    # unknown keys (warning only)
     for KEY in "${!_CFG[@]}"; do
       [[ "$KEY" == "${NAME}."* ]] || continue
       SUF=${KEY#"${NAME}".}
@@ -810,13 +810,13 @@ _config_validate() { #{{{
     done
   done
 
-  # 未知の global キー (警告のみ)
+  # unknown global keys (warning only)
   for KEY in "${!_GLOBAL[@]}"; do
     _in_array "$KEY" "${_KNOWN_GLOBAL_KEYS[@]}" && continue
     __show_warn "unknown key 'global.${KEY}' (ignored)"
   done
 
-  # 無効エントリの警告 (ポート重複のように 2 エントリで同一のものは 1 回だけ出す)
+  # warn about invalid entries (emit only once when two entries share a cause, e.g. a duplicate port)
   if [[ -z "$_NO_CFG_WARN" ]]; then
     local -A SEEN_MSG=()
     for NAME in "${_CFG_NAMES[@]}"; do
@@ -830,7 +830,7 @@ _config_validate() { #{{{
 }
 #}}}
 
-# 設定ファイルが他ユーザーから書き込み可能なら警告する (SPECS 11 章)
+# warn when the config file is writable by other users (SPECS chapter 11)
 _config_check_perms() { #{{{
   local F MODE
   for F in "${_CONFIG_FILES[@]}"; do
@@ -843,7 +843,7 @@ _config_check_perms() { #{{{
 }
 #}}}
 
-# 読み込み済みの設定を破棄する (reload 用)
+# discard the loaded configuration (used by reload)
 _config_reset() { #{{{
   _CFG=()
   _CFG_OPTS=()
@@ -856,7 +856,7 @@ _config_reset() { #{{{
 }
 #}}}
 
-# 設定の探索・読み込み・検証をまとめて行う
+# locate, load and validate the configuration in one go
 _config_setup() { #{{{
   _config_find
   _config_file_list
@@ -875,7 +875,7 @@ _config_setup() { #{{{
 }
 #}}}
 
-# 設定ファイルの雛形を生成する (SPECS 4.5)
+# generate a config file template (SPECS 4.5)
 _config_init() { #{{{
   local PATH_=$1 FORCE=$2 DIR
   if [[ -e "$PATH_" && -z "$FORCE" ]]; then
@@ -890,32 +890,32 @@ _config_init() { #{{{
 #
 # See 'pfwd help config' and SPECS.md for the full reference.
 
-# グローバル設定 (省略可。省略時は既定値)
+# global settings (optional; the defaults are used when omitted)
 global:
-  check_interval: 30          # 死活監視間隔(秒)。最小 5
-  connect_timeout: 10         # SSH 接続タイムアウト(秒)
-  retry_initial: 5            # 再接続の初回待ち時間(秒)
-  retry_max: 300              # 再接続待ち時間の上限(秒)
-  retry_limit: 0              # 連続失敗の上限回数。0 は無制限
-  server_alive_interval: 15   # SSH keepalive 間隔(秒)
-  server_alive_count_max: 3   # keepalive 応答なし許容回数
-  # log_file: ~/.local/state/port-forwarder/port-forwarder.log  # 未指定なら標準出力
+  check_interval: 30          # health check interval (sec); minimum 5
+  connect_timeout: 10         # SSH connect timeout (sec)
+  retry_initial: 5            # initial reconnect wait (sec)
+  retry_max: 300              # upper bound of the reconnect wait (sec)
+  retry_limit: 0              # max consecutive failures; 0 means unlimited
+  server_alive_interval: 15   # SSH keepalive interval (sec)
+  server_alive_count_max: 3   # allowed number of missed keepalives
+  # log_file: ~/.local/state/port-forwarder/port-forwarder.log  # stdout when unset
 
-# エントリ定義。キーがエントリ名 ([A-Za-z0-9._-]{1,32}) で一意
+# entry definitions; the key is the unique entry name ([A-Za-z0-9._-]{1,32})
 entries:
   example:
-    description: example tunnel     # 任意: 一覧表示に出る説明
-    host: bastion.example.com       # 必須: SSH 接続先ホスト
-    # user: your-name               # 任意: 既定は $USER
-    # port: 22                      # 任意: SSH ポート。既定 22
-    # identity: ~/.ssh/id_ed25519   # 任意: 秘密鍵
-    local_port: 18080               # 必須: ローカル待ち受けポート
-    remote_host: localhost          # 任意: 踏み台から見た転送先。既定 localhost
-    remote_port: 80                 # 必須: 転送先ポート
-    # bind_address: 127.0.0.1       # 任意: 既定 127.0.0.1
-    enabled: false                  # 任意: 既定 true
-    check_mode: remote              # 任意: process | tcp | remote。既定 remote
-    # ssh_options:                  # 任意: 追加の ssh -o 指定
+    description: example tunnel     # optional: description shown in listings
+    host: bastion.example.com       # required: SSH destination host
+    # user: your-name               # optional: defaults to $USER
+    # port: 22                      # optional: SSH port; default 22
+    # identity: ~/.ssh/id_ed25519   # optional: private key
+    local_port: 18080               # required: local listening port
+    remote_host: localhost          # optional: target seen from the bastion; default localhost
+    remote_port: 80                 # required: destination port
+    # bind_address: 127.0.0.1       # optional: default 127.0.0.1
+    enabled: false                  # optional: default true
+    check_mode: remote              # optional: process | tcp | remote; default remote
+    # ssh_options:                  # optional: extra ssh -o settings
     #   - Compression=yes
 PFWD_CONFIG_TEMPLATE
   chmod 600 "$PATH_" 2>/dev/null
@@ -929,11 +929,11 @@ PFWD_CONFIG_TEMPLATE
 #-------------------------------------------------------------------------------
 #- state functions -------------------------------------------------------------
 #{{{
-# state ファイルに書き出すキー (DESIGN 4.4)
+# keys written to the state file (DESIGN 4.4)
 _STATE_KEYS=(status pid ctl since connected_since retry_count backoff \
              next_retry_at next_check_at conn_sig last_error)
 
-# 実行時ディレクトリを決定する (DESIGN 3.3)
+# determine the runtime directory (DESIGN 3.3)
 _setup_runtime_dir() { #{{{
   if (( EUID == 0 )) && [[ "$_CONFIG_FILE" == '/etc/port-forwarder/'* ]]; then
     if [[ "$(uname)" == 'Darwin' ]]; then
@@ -950,7 +950,7 @@ _setup_runtime_dir() { #{{{
 }
 #}}}
 
-# 実行時ディレクトリを作成する (パーミッションは umask 077 に従う)
+# create the runtime directory (permissions follow umask 077)
 _state_init() { #{{{
   local D
   for D in "$_RUN_DIR" "${_RUN_DIR}/state" "${_RUN_DIR}/ctl" "${_RUN_DIR}/err"; do
@@ -962,7 +962,7 @@ _state_init() { #{{{
 }
 #}}}
 
-# state ファイルを読み込む。無ければ既定値で初期化する
+# load the state file; initialize it with defaults when it does not exist
 _state_load() { #{{{
   local NAME=$1 F K V
   F="${_RUN_DIR}/state/${NAME}.state"
@@ -978,7 +978,7 @@ _state_load() { #{{{
   _ST[${NAME}.conn_sig]=
   _ST[${NAME}.last_error]=
   [[ -f "$F" ]] || return 1
-  # state ファイルは source せず自前でパースする (DESIGN 9)
+  # parse the state file by hand instead of sourcing it (DESIGN 9)
   while IFS='=' read -r K V; do
     [[ -z "$K" ]] && continue
     _in_array "$K" "${_STATE_KEYS[@]}" || continue
@@ -997,7 +997,7 @@ _state_load_all() { #{{{
 }
 #}}}
 
-# _ST の内容を state ファイルへアトミックに書き出す (デーモンのみが呼ぶ)
+# write the contents of _ST to the state file atomically (called by the daemon only)
 _state_flush() { #{{{
   local NAME=$1 F TMP K
   F="${_RUN_DIR}/state/${NAME}.state"
@@ -1013,7 +1013,7 @@ _state_flush() { #{{{
 }
 #}}}
 
-# 変更のあったエントリだけを書き出す
+# write only the entries that changed
 _state_flush_dirty() { #{{{
   local NAME
   for NAME in "${!_ST_DIRTY[@]}"; do
@@ -1036,7 +1036,7 @@ _state_get() { #{{{
 }
 #}}}
 
-# 状態遷移はすべてこの関数を通す (ログの一貫性のため / DESIGN 5.4)
+# every state transition goes through this function (for log consistency / DESIGN 5.4)
 _state_transit() { #{{{
   local NAME=$1 NEW=$2 REASON=$3 OLD
   OLD=${_ST[${NAME}.status]}
@@ -1053,7 +1053,7 @@ _state_transit() { #{{{
 }
 #}}}
 
-# エントリ削除時に state / desired / err を削除する
+# remove state / desired / err when an entry is deleted
 _state_remove() { #{{{
   local NAME=$1 K
   rm -f "${_RUN_DIR}/state/${NAME}.state" \
@@ -1067,7 +1067,7 @@ _state_remove() { #{{{
 }
 #}}}
 
-# 希望状態を書く (書き手は CLI のみ / DESIGN 4.5)
+# write the desired state (only the CLI writes it / DESIGN 4.5)
 _desired_set() { #{{{
   local NAME=$1 VAL=$2 F TMP
   F="${_RUN_DIR}/state/${NAME}.desired"
@@ -1078,7 +1078,7 @@ _desired_set() { #{{{
 }
 #}}}
 
-# 希望状態を読む。ファイルが無ければ enabled を初期値とする
+# read the desired state; when the file does not exist, enabled is the initial value
 _desired_get() { #{{{
   local NAME=$1 F V
   F="${_RUN_DIR}/state/${NAME}.desired"
@@ -1107,13 +1107,13 @@ _desired_remove() { #{{{
 #-------------------------------------------------------------------------------
 #- ssh session functions -------------------------------------------------------
 #{{{
-# ControlPath を決定する (DESIGN 3.3)
+# determine the ControlPath (DESIGN 3.3)
 _ctl_path() { #{{{
   local NAME=$1 P BASE SUM
   P="${_RUN_DIR}/ctl/${NAME}.sock"
   if (( ${#P} > _CTL_PATH_MAX )); then
-    # UNIX ドメインソケットのパス長上限 (macOS 104 / Linux 108) を超えるため
-    # TMPDIR 配下の短いパスに退避する
+    # it would exceed the UNIX domain socket path length limit (macOS 104 / Linux 108),
+    # so fall back to a short path under TMPDIR
     BASE="${TMPDIR:-/tmp}/pfwd-${EUID}"
     mkdir -p "$BASE" 2>/dev/null
     chmod 700 "$BASE" 2>/dev/null
@@ -1126,14 +1126,14 @@ _ctl_path() { #{{{
 }
 #}}}
 
-# 接続パラメータの署名 (DESIGN 4.6)
+# signature of the connection parameters (DESIGN 4.6)
 _conn_sig() { #{{{
   local NAME=$1
   printf '%s\n' "${_CFG[${NAME}.host]}${_US}${_CFG[${NAME}.user]}${_US}${_CFG[${NAME}.port]}${_US}${_CFG[${NAME}.identity]}${_US}${_CFG[${NAME}.local_port]}${_US}${_CFG[${NAME}.remote_host]}${_US}${_CFG[${NAME}.remote_port]}${_US}${_CFG[${NAME}.bind_address]}${_US}${_CFG_OPTS[$NAME]}"
 }
 #}}}
 
-# エントリの ssh_options を配列に展開する
+# expand the ssh_options of an entry into an array
 _entry_ssh_options() { #{{{
   local NAME=$1
   _ENTRY_OPTS=()
@@ -1143,7 +1143,7 @@ _entry_ssh_options() { #{{{
 }
 #}}}
 
-# ssh の起動引数を _SSH_ARGS に組み立てる (DESIGN 5.5)
+# build the ssh invocation arguments into _SSH_ARGS (DESIGN 5.5)
 _ssh_build_args() { #{{{
   local NAME=$1 CTL=$2 OPT
   _entry_ssh_options "$NAME"
@@ -1161,7 +1161,7 @@ _ssh_build_args() { #{{{
     -L "${_CFG[${NAME}.bind_address]}:${_CFG[${NAME}.local_port]}:${_CFG[${NAME}.remote_host]}:${_CFG[${NAME}.remote_port]}")
   [[ -n "${_CFG[${NAME}.identity]}" ]] && _SSH_ARGS+=(-o IdentitiesOnly=yes -i "${_CFG[${NAME}.identity]}")
   [[ -n "${_CFG[${NAME}.user]}" ]] && _SSH_ARGS+=(-l "${_CFG[${NAME}.user]}")
-  # ユーザー指定の ssh_options は既定の後に置き、後勝ちで上書き可能とする
+  # user-specified ssh_options come after the defaults so that they win and can override them
   for OPT in "${_ENTRY_OPTS[@]}"; do
     _SSH_ARGS+=(-o "$OPT")
   done
@@ -1170,7 +1170,7 @@ _ssh_build_args() { #{{{
 }
 #}}}
 
-# ssh をバックグラウンド起動する。確立の完了は待たない (DESIGN 5.5)
+# start ssh in the background; do not wait for the connection to be established (DESIGN 5.5)
 _ssh_start() { #{{{
   local NAME=$1 CTL ERRF PID
   if ! CTL=$(_ctl_path "$NAME"); then
@@ -1196,7 +1196,7 @@ _ssh_start() { #{{{
 }
 #}}}
 
-# セッションが生きているか (ControlMaster を優先し、PID にフォールバックする)
+# whether the session is alive (prefers ControlMaster, falls back to the PID)
 _ssh_is_alive() { #{{{
   local NAME=$1 CTL PID
   CTL=${_ST[${NAME}.ctl]}
@@ -1210,13 +1210,13 @@ _ssh_is_alive() { #{{{
 }
 #}}}
 
-# セッションを確実に終了させる (DESIGN 5.5)
+# terminate the session reliably (DESIGN 5.5)
 _ssh_stop() { #{{{
   local NAME=$1 CTL PID I
   CTL=${_ST[${NAME}.ctl]}
   PID=${_ST[${NAME}.pid]}
 
-  # 1. ControlMaster 経由の終了
+  # 1. terminate via ControlMaster
   if [[ -n "$CTL" && -S "$CTL" ]]; then
     ssh -O exit -S "$CTL" -o BatchMode=yes "${_CFG[${NAME}.host]}" >/dev/null 2>&1
     for (( I = 0; I < 20; I++ )); do
@@ -1241,10 +1241,10 @@ _ssh_stop() { #{{{
     sleep 0.1
   fi
 
-  # 4. ソケットの後始末
+  # 4. clean up the socket
   [[ -n "$CTL" ]] && rm -f "$CTL" 2>/dev/null
 
-  # 5. PID を落とす
+  # 5. drop the PID
   _state_set "$NAME" pid 0
   return 0
 }
@@ -1257,7 +1257,7 @@ _ssh_pid_alive() { #{{{
 }
 #}}}
 
-# ssh の標準エラー出力から直近の意味のある 1 行を取り出し、ファイルを切り詰める
+# take the most recent meaningful line from ssh's stderr and truncate the file
 _ssh_take_error() { #{{{
   local NAME=$1 F LINE MSG=
   F="${_RUN_DIR}/err/${NAME}.err"
@@ -1274,7 +1274,7 @@ _ssh_take_error() { #{{{
 }
 #}}}
 
-# ssh の失敗理由を分類する (DESIGN 7.4)。fatal はリトライしても成功しえないもの
+# classify why ssh failed (DESIGN 7.4); fatal means retrying can never succeed
 _ssh_classify_error() { #{{{
   local MSG=$1
   case "$MSG" in
@@ -1292,7 +1292,7 @@ _ssh_classify_error() { #{{{
 }
 #}}}
 
-# 失敗理由に応じた追加の案内 (SPECS 9.2 / 10 章)
+# extra guidance for each failure reason (SPECS 9.2 / chapter 10)
 _ssh_error_hint() { #{{{
   local NAME=$1 MSG=$2
   case "$MSG" in
@@ -1312,7 +1312,7 @@ _ssh_error_hint() { #{{{
 #-------------------------------------------------------------------------------
 #- health check functions ------------------------------------------------------
 #{{{
-# 利用可能な TCP プローブ手段を判定する (DESIGN 5.6)
+# determine which TCP probe method is available (DESIGN 5.6)
 _probe_detect() { #{{{
   local OUT
   OUT=$( { exec 3<>'/dev/tcp/127.0.0.1/1'; } 2>&1 )
@@ -1330,14 +1330,14 @@ _probe_detect() { #{{{
 }
 #}}}
 
-# TCP 接続の可否のみを判定する (0=接続可 / 1=接続不可 / 2=判定不能)
+# test only whether a TCP connection can be made (0=connectable / 1=not connectable / 2=unknown)
 _probe_tcp() { #{{{
   local ADDR=$1 PORT=$2
   [[ -z "$_PROBE_BACKEND" ]] && _probe_detect
   case "$_PROBE_BACKEND" in
     devtcp)
-      # exec のリダイレクトエラーを握り潰すため、グループにまとめて 2> を掛ける
-      # (exec に直接 2>/dev/null を付けるとシェルの stderr 自体が差し替わる)
+      # group the commands and apply 2> there to swallow the redirection error of exec
+      # (attaching 2>/dev/null directly to exec would replace the shell's own stderr)
       { exec 3<>"/dev/tcp/${ADDR}/${PORT}"; } 2>/dev/null || return 1
       exec 3<&- 3>&-
       return 0 ;;
@@ -1350,35 +1350,35 @@ _probe_tcp() { #{{{
 }
 #}}}
 
-# 転送が成立しているかを判定する (0=成立 / 1=即切断 / 2=接続不可)
-# ローカルフォワードは転送先へのチャネルを開けないと接続を即座に閉じる。
+# determine whether the forward really works (0=works / 1=closed at once / 2=not connectable)
+# a local forward closes the connection at once when it cannot open a channel to the target.
 _probe_forward() { #{{{
   local ADDR=$1 PORT=$2 RC DUMMY
   { exec 3<>"/dev/tcp/${ADDR}/${PORT}"; } 2>/dev/null || return 2
-  # 受信内容は使わない (到達判定のみ)
+  # the received content is unused (reachability check only)
   # shellcheck disable=SC2034
   read -r -t "$_REMOTE_PROBE_WAIT" -N 1 -u 3 DUMMY
   RC=$?
   exec 3<&- 3>&-
-  (( RC == 0 ))  && return 0    # データを受信した = 転送先まで到達している
-  (( RC > 128 )) && return 0    # 待機タイムアウト = 接続が維持されている
-  return 1                      # EOF = 転送先へ届かず即切断された
+  (( RC == 0 ))  && return 0    # data received = the target is reachable
+  (( RC > 128 )) && return 0    # read timeout = the connection is kept alive
+  return 1                      # EOF = the target was unreachable and it was closed
 }
 #}}}
 
-# ローカルポートが空いているか (0=空き / 1=使用中)
+# whether the local port is free (0=free / 1=in use)
 _is_port_free() { #{{{
   local ADDR=$1 PORT=$2
   _probe_tcp "$ADDR" "$PORT"
   case $? in
-    0) return 1 ;;   # 接続できた = 使用中
-    1) return 0 ;;   # 接続できない = 空き
-    *) return 0 ;;   # 判定不能な場合は空きとみなす
+    0) return 1 ;;   # connected = in use
+    1) return 0 ;;   # not connectable = free
+    *) return 0 ;;   # treat unknown as free
   esac
 }
 #}}}
 
-# check_mode に応じた死活監視 (0=正常 / 1=異常)
+# health check according to check_mode (0=healthy / 1=unhealthy)
 _health_check() { #{{{
   local NAME=$1 MODE ADDR PORT RC
   MODE=${_CFG[${NAME}.check_mode]}
@@ -1395,14 +1395,14 @@ _health_check() { #{{{
       _probe_tcp "$ADDR" "$PORT"
       RC=$?
       (( RC == 0 )) && return 0
-      (( RC == 2 )) && return 0   # 判定不能なら process 相当に劣化する
+      (( RC == 2 )) && return 0   # degrade to the process check when unknown
       return 1 ;;
     remote)
       if [[ "$_PROBE_BACKEND" == 'devtcp' ]]; then
         _probe_forward "$ADDR" "$PORT" && return 0
         return 1
       fi
-      # /dev/tcp が使えない場合は tcp 相当に劣化する
+      # degrade to the tcp check when /dev/tcp is unavailable
       _probe_tcp "$ADDR" "$PORT"
       RC=$?
       (( RC == 0 )) && return 0
@@ -1421,7 +1421,7 @@ _DAEMON_RUNNING_PID=
 _CHECKS_THIS_TICK=0
 _RELOAD_COUNT=0
 
-# 死活監視で使うプローブ先アドレス (待ち受けが 0.0.0.0 でも 127.0.0.1 を叩く)
+# probe address used by the health check (hits 127.0.0.1 even when listening on 0.0.0.0)
 _probe_addr() { #{{{
   local A=${_CFG[${1}.bind_address]}
   [[ "$A" == '0.0.0.0' || "$A" == '::' ]] && A=127.0.0.1
@@ -1429,7 +1429,7 @@ _probe_addr() { #{{{
 }
 #}}}
 
-# 起動中のデーモンの PID を返す (生きていなければ 1)
+# return the PID of the running daemon (1 when it is not alive)
 _daemon_pid() { #{{{
   local F="${_RUN_DIR}/daemon.pid" PID
   [[ -f "$F" ]] || return 1
@@ -1441,7 +1441,7 @@ _daemon_pid() { #{{{
 }
 #}}}
 
-# mkdir の原子性でロックを取る (flock は macOS に無いため使わない / DESIGN 5.8)
+# take a lock with the atomicity of mkdir (flock is not on macOS, so it is not used / DESIGN 5.8)
 _daemon_lock_acquire() { #{{{
   local LOCK="${_RUN_DIR}/daemon.lock" PID
   _DAEMON_RUNNING_PID=
@@ -1470,7 +1470,7 @@ _daemon_lock_release() { #{{{
 }
 #}}}
 
-# 採用した設定と起動時刻を記録する (reload 完了の通知も兼ねる)
+# record the config in use and the start time (also signals that reload finished)
 _daemon_write_meta() { #{{{
   local F="${_RUN_DIR}/daemon.meta" TMP="${_RUN_DIR}/daemon.meta.tmp"
   {
@@ -1485,12 +1485,12 @@ _daemon_write_meta() { #{{{
 }
 #}}}
 
-# シグナルハンドラはフラグを立てるだけにする (DESIGN 5.7)
+# signal handlers only raise a flag (DESIGN 5.7)
 _on_term() { _SHUTDOWN=1; }
 _on_hup()  { _FLAG_HUP=1; }
 _on_usr1() { _FLAG_USR1=1; }
 
-# state を読み直し、監視時刻を分散させる (DESIGN 5.7)
+# re-read the state and spread out the check times (DESIGN 5.7)
 _daemon_init_states() { #{{{
   local NAME NOW I=0 INTERVAL
   NOW=$(_now)
@@ -1503,7 +1503,7 @@ _daemon_init_states() { #{{{
       _state_set "$NAME" last_error "${_CFG_INVALID[$NAME]}"
       _state_transit "$NAME" failed 'invalid configuration'
     elif _ssh_is_alive "$NAME"; then
-      # 前回のデーモンが残したセッションを引き継ぐ
+      # take over the sessions left behind by the previous daemon
       (( _ST[${NAME}.connected_since] == 0 )) && _state_set "$NAME" connected_since "$NOW"
       _state_transit "$NAME" connected 'adopted an existing session'
     else
@@ -1523,7 +1523,7 @@ _daemon_init_states() { #{{{
 }
 #}}}
 
-# 希望状態と現在の状態を突き合わせる (DESIGN 5.7)
+# reconcile the desired state with the current state (DESIGN 5.7)
 _daemon_reconcile() { #{{{
   local NAME D S ADDR PORT
   for NAME in "${_CFG_NAMES[@]}"; do
@@ -1558,7 +1558,7 @@ _daemon_reconcile() { #{{{
 }
 #}}}
 
-# 再試行状態へ入る (指数バックオフ / SPECS 5.3)
+# enter the retry state (exponential backoff / SPECS 5.3)
 _enter_retrying() { #{{{
   local NAME=$1 NOW=$2 RC BO
   RC=$(( _ST[${NAME}.retry_count] + 1 ))
@@ -1578,7 +1578,7 @@ _enter_retrying() { #{{{
 }
 #}}}
 
-# 1 エントリ 1 サイクル分の状態遷移 (DESIGN 5.7 / SPECS 5.1)
+# state transition of one entry for one cycle (DESIGN 5.7 / SPECS 5.1)
 _daemon_tick_entry() { #{{{
   local NAME=$1 NOW=$2 ST ADDR PORT MSG HINT CLASS RC INTERVAL
   ST=${_ST[${NAME}.status]}
@@ -1593,7 +1593,7 @@ _daemon_tick_entry() { #{{{
       _CHECKS_THIS_TICK=$(( _CHECKS_THIS_TICK + 1 ))
       if _health_check "$NAME"; then
         _state_set "$NAME" next_check_at $(( NOW + INTERVAL ))
-        # 60 秒以上継続したらバックオフをリセットする (SPECS 5.3)
+        # reset the backoff once the session has lasted 60 seconds or more (SPECS 5.3)
         if (( NOW - _ST[${NAME}.connected_since] >= 60 )) && (( _ST[${NAME}.retry_count] > 0 )); then
           _state_set "$NAME" retry_count 0
           _state_set "$NAME" backoff "${_GLOBAL[retry_initial]}"
@@ -1622,7 +1622,7 @@ _daemon_tick_entry() { #{{{
         fi
         return 0
       fi
-      # 確立の判定は check_mode に関わらず tcp 相当で行う (DESIGN 5.6)
+      # establishment is judged with the tcp check regardless of check_mode (DESIGN 5.6)
       _probe_tcp "$ADDR" "$PORT"
       RC=$?
       if (( RC == 0 || RC == 2 )); then
@@ -1644,7 +1644,7 @@ _daemon_tick_entry() { #{{{
         _state_transit "$NAME" failed 'retry limit reached'
         return 0
       fi
-      # ローカルポートが他プロセスに使われている場合は再試行しない (SPECS 5.3)
+      # do not retry when the local port is used by another process (SPECS 5.3)
       if ! _is_port_free "$ADDR" "$PORT"; then
         _state_set "$NAME" last_error "$(_err_port_in_use "$NAME" "$PORT")"
         _log_error "$NAME" "$(_err_port_in_use "$NAME" "$PORT")"
@@ -1654,19 +1654,19 @@ _daemon_tick_entry() { #{{{
       _ssh_start "$NAME" ;;
 
     stopped|disabled|failed)
-      : ;;   # デーモンからは何もしない。desired の変更でのみ復帰する
+      : ;;   # the daemon does nothing; only a desired change brings it back
   esac
   return 0
 }
 #}}}
 
-# 設定を読み直して差分を反映する (SPECS 5.5)
+# re-read the configuration and apply the differences (SPECS 5.5)
 _daemon_reload() { #{{{
   local NAME SIG ADDED=0 REMOVED=0 RESTARTED=0 DISABLED=0
   local -a OLD_NAMES=("${_CFG_NAMES[@]}")
 
   _OPT_CONFIG=$_CONFIG_FILE
-  # 先にサブシェルで検証し、失敗したら旧設定を維持する (デーモンは落とさない)
+  # validate in a subshell first and keep the old config on failure (do not kill the daemon)
   if ! ( _NO_CFG_WARN=yes; _config_reset; _config_setup ) >/dev/null 2>&1; then
     _log_error - 'config reload failed; keeping the previous configuration'
     return 1
@@ -1734,7 +1734,7 @@ _daemon_reload() { #{{{
 }
 #}}}
 
-# 全セッションを停止して終了する (SPECS 5.4)
+# stop every session and exit (SPECS 5.4)
 _daemon_shutdown() { #{{{
   local NAME
   _log_info - 'shutting down'
@@ -1755,7 +1755,7 @@ _daemon_shutdown() { #{{{
 }
 #}}}
 
-# デーモン本体 (DESIGN 5.7)
+# the daemon itself (DESIGN 5.7)
 _daemon_main() { #{{{
   local NAME NOW
   umask 077
@@ -1791,7 +1791,7 @@ _daemon_main() { #{{{
       _daemon_tick_entry "$NAME" "$NOW"
     done
     _state_flush_dirty
-    # 終了した ssh を回収する (ゾンビを kill -0 で生存と誤判定しないため)
+    # reap exited ssh processes (so kill -0 does not mistake a zombie for a live one)
     jobs > /dev/null 2>&1
     sleep 1
   done
@@ -2023,7 +2023,7 @@ PFWD_HELP
 #-------------------------------------------------------------------------------
 #- subcommand functions --------------------------------------------------------
 #{{{
-# エントリの SSH 接続先表記 (user@host[:port])
+# SSH destination notation of an entry (user@host[:port])
 _ssh_label() { #{{{
   local NAME=$1 U H P L
   U=${_CFG[${NAME}.user]}
@@ -2079,13 +2079,13 @@ _cmd_config() { #{{{
 }
 #}}}
 
-# 操作対象のエントリ名を解決する (DESIGN 5.9)
+# resolve the entry names to operate on (DESIGN 5.9)
 _resolve_names() { #{{{
   local NAME
   _TARGETS=()
   if (( ${#_ARGS[@]} == 0 )); then
     if [[ "$_SUBCMD" == 'start' ]]; then
-      # 省略時は enabled かつ有効なエントリのみ (SPECS 3.1)
+      # when omitted, only entries that are enabled and valid (SPECS 3.1)
       for NAME in "${_CFG_NAMES[@]}"; do
         [[ -n "${_CFG_INVALID[$NAME]}" ]] && continue
         [[ "${_CFG[${NAME}.enabled]}" == 'false' ]] && continue
@@ -2104,7 +2104,7 @@ _resolve_names() { #{{{
 }
 #}}}
 
-# 実行ファイルの絶対パス
+# absolute path of the executable
 _self_path() { #{{{
   local P=$0
   if [[ "$P" != /* ]]; then
@@ -2124,7 +2124,7 @@ _status_color() { #{{{
 }
 #}}}
 
-# エントリ 1 行分の補足説明 (description が無い場合は状況を出す)
+# note appended to an entry line (shows the situation when there is no description)
 _status_note() { #{{{
   local NAME=$1 ST=$2 NOW=$3 D
   D=${_CFG[${NAME}.description]}
@@ -2143,7 +2143,7 @@ _status_note() { #{{{
 }
 #}}}
 
-# CLI から見たエントリの表示状態を決める
+# determine the display status of an entry as seen from the CLI
 _display_status() { #{{{
   local NAME=$1 DAEMON_UP=$2 ST
   ST=${_ST[${NAME}.status]}
@@ -2152,7 +2152,7 @@ _display_status() { #{{{
     return 0
   fi
   if [[ -z "$DAEMON_UP" ]]; then
-    # デーモン未起動時は実プロセスの有無で判定する (DESIGN 5.9)
+    # when the daemon is not running, judge by the presence of the real process (DESIGN 5.9)
     case "$ST" in
       connected|connecting|retrying)
         if [[ -n "${_ST[${NAME}.ctl]}" && -S "${_ST[${NAME}.ctl]}" ]] \
@@ -2219,7 +2219,7 @@ _cmd_status() { #{{{
       "$UPTIME" "$RETRY" "$NOTE"
   done
 
-  # 集計行
+  # summary line
   local S SUMMARY=''
   for S in connected connecting retrying stopped disabled failed; do
     (( ${COUNT[$S]:-0} > 0 )) || continue
@@ -2235,7 +2235,7 @@ _cmd_status() { #{{{
 }
 #}}}
 
-# desired を書いた後、state の変化を待って結果を表示する (DESIGN 5.9)
+# after writing desired, wait for the state to change and print the result (DESIGN 5.9)
 _wait_result() { #{{{
   local EXPECT=$1 TIMEOUT=$2
   shift 2
@@ -2245,7 +2245,7 @@ _wait_result() { #{{{
   _WAIT_OK=0
   _WAIT_NG=0
   (( ${#NAMES[@]} == 0 )) && return 0
-  MAX=$(( TIMEOUT * 5 ))   # 0.2 秒間隔
+  MAX=$(( TIMEOUT * 5 ))   # 0.2 second interval
   for (( I = 0; I <= MAX; I++ )); do
     ALL=1
     for NAME in "${NAMES[@]}"; do
@@ -2283,8 +2283,8 @@ _wait_result() { #{{{
 }
 #}}}
 
-# デーモンの生存を確認し、PID を _DAEMON_PID に入れる。
-# 値を stdout で返すとコマンド置換の中でしか exit できないため、変数で渡す。
+# check that the daemon is alive and put its PID into _DAEMON_PID.
+# returning it on stdout would only allow exiting inside a command substitution, so use a variable.
 _require_daemon() { #{{{
   _DAEMON_PID=$(_daemon_pid) || _error_exit "$_EXIT_NO_DAEMON" "$(_err_no_daemon)"
   return 0
@@ -2355,7 +2355,7 @@ _cmd_restart() { #{{{
   DPID=$_DAEMON_PID
   _resolve_names
   _calc_name_width "${_TARGETS[@]}"
-  # 一度 down にしてから up にすることでバックオフをリセットする (SPECS 5.3)
+  # going down first and then up resets the backoff (SPECS 5.3)
   for NAME in "${_TARGETS[@]}"; do
     _state_load "$NAME"
     if [[ -n "${_CFG_INVALID[$NAME]}" ]]; then
@@ -2383,7 +2383,7 @@ _cmd_restart() { #{{{
 }
 #}}}
 
-# 表示せずに停止完了を待つ (restart の前半で使う)
+# wait for the stop to finish without printing (used in the first half of restart)
 _wait_stopped_quiet() { #{{{
   local TIMEOUT=$1
   shift
@@ -2418,8 +2418,8 @@ _cmd_up() { #{{{
   if command -v setsid >/dev/null 2>&1; then
     setsid "${CMD[@]}" </dev/null >/dev/null 2>&1 &
   else
-    # nohup は SIGHUP を無視状態にしてしまい reload (SIGHUP) を受け取れなくなるため
-    # 使わない。端末からの SIGINT だけをサブシェルで無視させる。
+    # nohup is not used because it leaves SIGHUP ignored, which would keep reload (SIGHUP)
+    # from being received. Only SIGINT from the terminal is ignored in a subshell.
     ( trap '' INT; exec "${CMD[@]}" ) </dev/null >/dev/null 2>&1 &
   fi
   disown 2>/dev/null
@@ -2449,7 +2449,7 @@ _cmd_down() { #{{{
     __show_warn "daemon (pid=${PID}) did not stop within 15s; sending SIGKILL"
     kill -KILL "$PID" 2>/dev/null
     sleep 0.5
-    # 残ったセッションを ControlPath 経由で掃除する
+    # clean up the remaining sessions via ControlPath
     for NAME in "${_CFG_NAMES[@]}"; do
       _state_load "$NAME"
       CTL=${_ST[${NAME}.ctl]}
@@ -2469,7 +2469,7 @@ _cmd_reload() { #{{{
   local PID OLD NEW I META="${_RUN_DIR}/daemon.meta"
   _require_daemon
   PID=$_DAEMON_PID
-  # 完了判定は daemon.meta の内容変化で行う (mtime の 1 秒粒度に依存しないため)
+  # completion is detected by a content change of daemon.meta (not by mtime, whose granularity is 1 second)
   OLD=$(cat "$META" 2>/dev/null)
   kill -HUP "$PID" 2>/dev/null
   for (( I = 0; I < 50; I++ )); do
@@ -2495,7 +2495,7 @@ _cmd_logs() { #{{{
   done
   LOG=${_GLOBAL[log_file]}
   if [[ -z "$LOG" ]]; then
-    # 標準出力に出している場合の参照方法を案内する (SPECS 6.5)
+    # explain how to read the log when it goes to stdout (SPECS 6.5)
     cat <<PFWD_LOGS_HINT
 global.log_file is not set, so logs go to standard output.
   - systemd (user)  : journalctl --user -u port-forwarder -f
@@ -2525,7 +2525,7 @@ PFWD_LOGS_HINT
 }
 #}}}
 
-# 接続テスト用の ssh 到達性確認 (フォワードは張らない / DESIGN 5.9)
+# ssh reachability check for the connection test (no forward is set up / DESIGN 5.9)
 _test_ssh_reach() { #{{{
   local NAME=$1 OUT RC OPT
   local -a ARGS=(ssh -T
@@ -2596,7 +2596,7 @@ _cmd_test() { #{{{
 }
 #}}}
 
-# systemd unit の内容を生成する (DESIGN 5.10)
+# generate the contents of the systemd unit (DESIGN 5.10)
 _service_unit_text() { #{{{
   local SCOPE=$1 RUN_AS=$2 EXEC=$3
   cat <<PFWD_UNIT
@@ -2736,8 +2736,8 @@ _cmd_help() { #{{{
 #-------------------------------------------------------------------------------
 #- argument parsing ------------------------------------------------------------
 #{{{
-# template.sh の __LONG_OPT_NAMES 方式は --config <PATH> のような値付きオプションを
-# 扱えないため、統合パーサをここに実装する (DESIGN 5.9)。
+# the __LONG_OPT_NAMES scheme of template.sh cannot handle options that take a value,
+# such as --config <PATH>, so an integrated parser is implemented here (DESIGN 5.9).
 _parse_args() { #{{{
   while (( $# > 0 )); do
     case "$1" in
@@ -2754,7 +2754,7 @@ _parse_args() { #{{{
       --)           shift
                     while (( $# > 0 )); do _ARGS+=("$1"); shift; done
                     break ;;
-      # サブコマンド固有オプションは各 _cmd_* が解析する
+      # subcommand-specific options are parsed by each _cmd_*
       --init|--force|--user|--system|--now|--exit-code|-f)
                     _SUBCMD_OPTS+=("$1"); shift ;;
       --run-as)
@@ -2772,13 +2772,13 @@ _parse_args() { #{{{
         shift ;;
     esac
   done
-  # SPECS 3.1: 引数なしは status
+  # SPECS 3.1: no arguments means status
   [[ -z "$_SUBCMD" ]] && _SUBCMD=status
   return 0
 }
 #}}}
 
-# 依存コマンドの存在確認 (DESIGN 7.2)
+# check that the required commands exist (DESIGN 7.2)
 _check_prerequisites() { #{{{
   local CMD
   for CMD in ssh yq; do
@@ -2792,7 +2792,7 @@ _check_prerequisites() { #{{{
 #-------------------------------------------------------------------------------
 #- Main process ----------------------------------------------------------------
 #-------------------------------------------------------------------------------
-# テスト (bats) では関数定義のみを読み込む
+# in tests (bats) only the function definitions are loaded
 [[ -n "$PFWD_SOURCE_ONLY" ]] && return 0
 
 umask 077
@@ -2874,7 +2874,7 @@ case "$_SUBCMD" in
     _cmd_logs ;;
   test)
     _check_prerequisites
-    # 検証結果は test 自身が 1 行ずつ表示するため、読み込み時の警告は抑止する
+    # test prints the validation results line by line itself, so suppress warnings at load time
     _NO_CFG_WARN=yes
     _config_setup
     _NO_CFG_WARN=
