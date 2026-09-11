@@ -296,31 +296,6 @@ _sanitize() { #{{{
 }
 #}}}
 
-# return the entry name closest to a typo (distance 3 or less)
-_suggest_name() { #{{{
-  local TARGET=$1
-  (( ${#_CFG_NAMES[@]} == 0 )) && return 0
-  printf '%s\n' "${_CFG_NAMES[@]}" | awk -v t="$TARGET" '
-    function lev(s, u,   m, n, i, j, cost, x, y, z, d) {
-      m = length(s); n = length(u)
-      for (i = 0; i <= m; i++) d[i, 0] = i
-      for (j = 0; j <= n; j++) d[0, j] = j
-      for (i = 1; i <= m; i++) {
-        for (j = 1; j <= n; j++) {
-          cost = (substr(s, i, 1) == substr(u, j, 1)) ? 0 : 1
-          x = d[i-1, j] + 1; y = d[i, j-1] + 1; z = d[i-1, j-1] + cost
-          d[i, j] = (x < y) ? x : y
-          if (z < d[i, j]) d[i, j] = z
-        }
-      }
-      return d[m, n]
-    }
-    { c = lev(t, $0); if (best == "" || c < bd) { bd = c; best = $0 } }
-    END { if (best != "" && bd <= 3) print best }'
-  return 0
-}
-#}}}
-
 # abort with an error message and an exit code (DESIGN 7.1)
 _error_exit() { #{{{
   local CODE=$1
@@ -443,16 +418,7 @@ _err_no_identity()     { echo "[$1] identity file $2 does not exist"; }
 _err_no_command()      { echo "required command '$1' not found. Install it and make sure it is in your PATH."; }
 _err_daemon_running()  { echo "daemon is already running (pid $1). Use '${__SCRIPT_NAME} down' to stop it."; }
 _err_no_daemon()       { echo "daemon is not running. Run '${__SCRIPT_NAME} up' to start it."; }
-_err_no_entry()        { #{{{
-  local S
-  S=$(_suggest_name "$1")
-  if [[ -n "$S" ]]; then
-    echo "no such entry '$1'. Did you mean '$S'?"
-  else
-    echo "no such entry '$1'"
-  fi
-}
-#}}}
+_err_no_entry()        { echo "no such entry '$1'"; }
 #}}}
 
 #-------------------------------------------------------------------------------

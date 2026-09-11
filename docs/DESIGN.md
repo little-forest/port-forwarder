@@ -98,7 +98,7 @@ _show_result <RESULT> <NAME> <MESSAGE>
  2. common global variables              __SCRIPT_BASE / __SCRIPT_NAME / __SILENT
  3. global variables                     _VERSION / _CONFIG_FILE / _RUN_DIR / 連想配列群 / 終了コード定数
  4. common functions                     template.sh 由来（__setup, __setup_color, __show_*, __make_tmp ...）
- 5. utility functions                    _now / _epoch_to_hms / _expand_tilde / _in_array / _suggest_name
+ 5. utility functions                    _now / _epoch_to_hms / _expand_tilde / _in_array
  6. logging functions                    _log_init / _log / _debug
  7. config functions                     _config_find / _config_load / _config_validate ...
  8. state functions                      _state_* / _desired_*
@@ -308,7 +308,6 @@ host / user / port / identity / local_port / remote_host / remote_port / bind_ad
 | `_fmt_uptime` | 秒数 | stdout | `2d 04:11` / `05:22` 形式に整形（SPECS 6.1） |
 | `_expand_tilde` | パス | stdout | 先頭 `~` を `$HOME` に展開 |
 | `_in_array` | 値 配列要素... | 0/1 | 存在判定 |
-| `_suggest_name` | 誤入力名 | stdout | `_CFG_NAMES` から最も近い名前を返す。awk による簡易 Levenshtein 距離で、距離が 3 以下かつ最小のものを 1 件返す（該当なしなら空） |
 | `_truncate` | 文字列 幅 | stdout | 幅超過時に末尾を `...` に置換（SPECS 6.2 の SSH 列） |
 | `_sanitize` | 文字列 | stdout | 改行・タブ・制御文字を空白に置換（state / ログ書き込み前に必ず通す） |
 
@@ -686,7 +685,7 @@ _resolve_names <引数...>:
     stop/restart -> 全エントリ
     status/test  -> 全エントリ
   引数があれば _CFG_NAMES に照合し、無いものは
-    __show_error "no such entry 'db-pord'. Did you mean 'db-prod'?"
+    __show_error "no such entry 'db-pord'"
     exit 2
 ```
 
@@ -839,7 +838,7 @@ _err_key_perm()       { echo "[$1] identity file $2 has too open permissions ($3
 _err_no_command()     { echo "required command '$1' not found. Install it and make sure it is in your PATH."; }
 _err_daemon_running() { echo "daemon is already running (pid $1). Use 'pfwd down' to stop it."; }
 _err_no_daemon()      { echo "daemon is not running. Run 'pfwd up' to start it."; }
-_err_no_entry()       { local S; S=$(_suggest_name "$1"); [[ -n "$S" ]] && echo "no such entry '$1'. Did you mean '$S'?" || echo "no such entry '$1'"; }
+_err_no_entry()       { echo "no such entry '$1'"; }
 ```
 
 ### 7.4 ssh 失敗理由の分類
@@ -916,7 +915,7 @@ test/
 | `test_state` | state のアトミック書き込み / 読み書きの往復 / desired の既定値（ファイル無し時は `enabled` に従う） / `_state_transit` がログを 1 行出すこと |
 | `test_statemachine` | `_daemon_tick_entry` を `_ssh_*` / `_health_check` のスタブと組み合わせ、SPECS 5.1 の全遷移を検証。バックオフ列（5→10→20→…→300 で頭打ち） / 60 秒継続でのリセット / `retry_limit` 到達で `failed` / ポート使用中で即 `failed` |
 | `test_probe` | `nc -l` で立てたポートに対する `_probe_tcp` / 未使用ポートでの `_is_port_free` / 接続直後に閉じるサーバに対する `_probe_forward` が 1 を返すこと / 接続を保持するサーバに対して 0 を返すこと |
-| `test_cli` | 引数解析（`--config=` 形式を含む） / 引数なしで `status` になること / 未知エントリ名で終了コード 2 とサジェスト / デーモン未起動時の `start` が終了コード 5 / `--exit-code` の挙動 / `_fmt_uptime` の整形 / 出力表の桁揃え |
+| `test_cli` | 引数解析（`--config=` 形式を含む） / 引数なしで `status` になること / 未知エントリ名で終了コード 2 / デーモン未起動時の `start` が終了コード 5 / `--exit-code` の挙動 / `_fmt_uptime` の整形 / 出力表の桁揃え |
 | `test_integration` | `PFWD_IT=1` のときのみ実行。`localhost` への ssh でデーモンを起動し、`up` → `status` → `stop` → `down` を通す。ssh プロセスを外部から kill して再接続を確認する |
 
 ### 10.3 静的検査

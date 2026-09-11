@@ -134,16 +134,10 @@ reset_args() {
   [ "${#_TARGETS[@]}" -eq 3 ]
 }
 
-@test "cli: 存在しないエントリ名は終了コード 2 でサジェストする" {
+@test "cli: 存在しないエントリ名は終了コード 2 でエラーになる" {
   run "$PFWD" --config "${FIXTURES}/basic.yaml" status db-pord
   [ "$status" -eq 2 ]
-  [[ "$output" == *"no such entry 'db-pord'. Did you mean 'db-prod'?"* ]]
-}
-
-@test "cli: かけ離れた名前ではサジェストしない" {
-  load_config "${FIXTURES}/basic.yaml"
-  run _err_no_entry 'zzzzzzzzzz'
-  [ "$output" = "no such entry 'zzzzzzzzzz'" ]
+  [[ "$output" == *"no such entry 'db-pord'"* ]]
 }
 
 @test "cli: デーモン未起動の start は終了コード 5" {

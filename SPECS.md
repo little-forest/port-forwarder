@@ -504,7 +504,7 @@ Run the following to enable:
 | 鍵ファイル権限不正 | `error: [db-prod] identity file ~/.ssh/id_ed25519 has too open permissions (0644). Run: chmod 600 ~/.ssh/id_ed25519` |
 | 依存コマンド不足 | `error: required command 'yq' not found. Install it and make sure it is in your PATH.` |
 | デーモン二重起動 | `error: daemon is already running (pid 48120). Use 'pfwd down' to stop it.` |
-| 未知のエントリ名 | `error: no such entry 'db-pord'. Did you mean 'db-prod'?` |
+| 未知のエントリ名 | `error: no such entry 'db-pord'` |
 
 ---
 
