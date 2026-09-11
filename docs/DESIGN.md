@@ -123,12 +123,11 @@ _show_result <RESULT> <NAME> <MESSAGE>
 | ファイル | 内容 |
 | --- | --- |
 | `pfwd` | 本体（実行可能） |
-| `port-forwarder` | `pfwd` へのシンボリックリンク |
 | `SPECS.md` / `docs/DESIGN.md` | 外部設計 / 内部設計 |
 | `test/*.bats` | bats テスト |
 | `test/fixtures/*.yaml` | テスト用設定ファイル |
 
-`$0` のベース名が `port-forwarder` でも `pfwd` でも動作は同一とする（`__SCRIPT_NAME` は usage 表示にのみ使う）。
+`__SCRIPT_NAME` は usage・メッセージの表示にのみ使う。
 
 ### 3.3 実行時ディレクトリ
 
@@ -714,7 +713,7 @@ TimeoutStopSec=30
 WantedBy=default.target
 ```
 
-- `ExecStart` のパスは `readlink -f "$0"` で解決した絶対パスを埋め込む（SPECS 9.1 の `/usr/local/bin/pfwd` は既定の例示）。
+- `ExecStart` のパスは `_self_path()` で解決した絶対パスを埋め込む（SPECS 9.1 の `/usr/local/bin/pfwd` は既定の例示）。
 - `--system` の場合は `/etc/systemd/system/port-forwarder.service` に生成し、`User=<--run-as の値>` と `WantedBy=multi-user.target` を加える。`--run-as` 省略時は root 実行となるため警告を出す。
 - `KillMode=mixed` により、停止時にメインプロセスへ SIGTERM が送られ、自前の `_daemon_shutdown` で子 ssh を確実に終了させられる。
 - `--now` 指定時は `systemctl [--user] daemon-reload` と `enable --now` を実行する。省略時は SPECS 9.1 の通り実行すべきコマンドを表示するに留める。
