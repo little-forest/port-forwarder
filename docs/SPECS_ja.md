@@ -110,7 +110,7 @@ pfwd <サブコマンド> [オプション] [エントリ名...]
 
 | オプション | 説明 |
 | --- | --- |
-| `-c, --config <PATH>` | 使用する設定ファイルを指定する |
+| `-c, --config <PATH>` | 使用する設定ファイルを指定する。`config --init` では雛形の作成先になる（4.5 参照） |
 | `-v, --verbose` | 詳細ログを標準エラー出力に出す（`-vv` でさらに詳細） |
 | `-q, --quiet` | エラー以外の出力を抑制する |
 | `--no-color` | 色付けを無効化する（非 TTY 時は自動で無効） |
@@ -248,6 +248,22 @@ Edit the file and run 'pfwd test' to validate.
 ```
 
 既にファイルが存在する場合は上書きせずエラーとする（`--force` で上書き可）。
+
+作成先は共通オプション `-c, --config <PATH>`（3.2）で指定できる。この場合、指定パスは 4.1 の探索対象では
+ないため、以降の実行でも `-c` が必要である旨を `Note:` 行で案内する。
+
+```console
+$ pfwd --config ~/work/pfwd.yaml config --init
+Created: /home/komori/work/pfwd.yaml
+Edit the file and run 'pfwd test' to validate.
+Note: this path is not searched automatically. Run 'pfwd --config /home/komori/work/pfwd.yaml <subcommand>'.
+```
+
+指定先が既存のディレクトリの場合は、`<DIR>/config.yaml` への補完は行わずエラーとする（終了コード 1）。
+`--force` を付けた場合も同様。
+
+`config` は位置引数を取らない。`pfwd config --init ~/foo.yaml` のように指定した場合は、既定パスへ
+意図せず作成されることを防ぐため usage を表示して終了コード 2 で終わる。
 
 ---
 
@@ -507,6 +523,8 @@ Run the following to enable:
 | 依存コマンド不足 | `error: required command 'yq' not found. Install it and make sure it is in your PATH.` |
 | デーモン二重起動 | `error: daemon is already running (pid 48120). Use 'pfwd down' to stop it.` |
 | 未知のエントリ名 | `error: no such entry 'db-pord'` |
+| 設定ファイル作成先がディレクトリ | `error: /home/komori/work is a directory. Specify the config file itself (e.g. /home/komori/work/config.yaml)` |
+| `config` に余分な引数 | `error: 'config' takes no arguments. Use 'pfwd --config <PATH> config --init' to choose where the file is created.` |
 
 ---
 

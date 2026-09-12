@@ -120,7 +120,7 @@ Running `pfwd` with no arguments behaves the same as `pfwd status`.
 
 | Option | Description |
 | --- | --- |
-| `-c, --config <PATH>` | Specify the config file to use |
+| `-c, --config <PATH>` | Specify the config file to use; with `config --init` it is where the template is created (see 4.5) |
 | `-v, --verbose` | Write verbose logs to standard error (`-vv` for even more detail) |
 | `-q, --quiet` | Suppress all output except errors |
 | `--no-color` | Disable colouring (automatically disabled when not a TTY) |
@@ -271,6 +271,23 @@ Edit the file and run 'pfwd test' to validate.
 
 If the file already exists it is not overwritten and an error is returned (`--force` allows
 overwriting).
+
+The destination can be chosen with the common option `-c, --config <PATH>` (3.2). Such a path is
+not part of the search order in 4.1, so a `Note:` line points out that `-c` is needed on subsequent
+runs as well.
+
+```console
+$ pfwd --config ~/work/pfwd.yaml config --init
+Created: /home/komori/work/pfwd.yaml
+Edit the file and run 'pfwd test' to validate.
+Note: this path is not searched automatically. Run 'pfwd --config /home/komori/work/pfwd.yaml <subcommand>'.
+```
+
+If the destination is an existing directory it is an error (exit code 1); it is not completed to
+`<DIR>/config.yaml`. The same applies with `--force`.
+
+`config` takes no positional arguments. Passing one, as in `pfwd config --init ~/foo.yaml`, prints
+the usage and exits with code 2, so that the file is never created at the default path by mistake.
 
 ---
 
@@ -565,6 +582,8 @@ Every message contains all three of "**what happened / why / what to do about it
 | Missing dependency | `error: required command 'yq' not found. Install it and make sure it is in your PATH.` |
 | Daemon double start | `error: daemon is already running (pid 48120). Use 'pfwd down' to stop it.` |
 | Unknown entry name | `error: no such entry 'db-pord'` |
+| Config destination is a directory | `error: /home/komori/work is a directory. Specify the config file itself (e.g. /home/komori/work/config.yaml)` |
+| Extra arguments to `config` | `error: 'config' takes no arguments. Use 'pfwd --config <PATH> config --init' to choose where the file is created.` |
 
 ---
 
