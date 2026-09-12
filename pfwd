@@ -112,27 +112,54 @@ __setup() { #{{{
 }
 #}}}
 
+# Emit ANSI SGR sequences directly instead of calling tput.
+# tput needed 172 forks here (~0.8s on macOS), and its terminfo lookup was not
+# actually more portable: on 8-color entries (linux, ansi, rxvt, putty) the
+# bright colors 8-15 came out as broken sequences (setaf 9 -> ESC[39m, which
+# resets the foreground instead of turning it red), and terminals missing from
+# the system terminfo DB (kitty, alacritty, ghostty, wezterm, foot) produced
+# no color at all. The capability probe tput did provide is replaced by the
+# TERM / NO_COLOR check below.
 __setup_color() { #{{{
-  local I
+  local I NAME NUM SGR
+  local ESC=$'\033'
+
+  # terminals that cannot show color
+  case "${TERM:-dumb}" in
+    dumb|*-mono|vt100|vt102|vt220) return 0 ;;
+  esac
+  # https://no-color.org/
+  [[ -n "$NO_COLOR" ]] && return 0
+
   local COLOR_MAP=(\
     BLACK 0 MAROON 1 GREEN 2 OLIVE 3 NAVY 4 PURPLE 5 TEAL 6 SILVER 7 GREY 8 \
     RED 9 LIME 10 YELLOW 11 BLUE 12 FUCHSIA 13 AQUA 14 WHITE 15 \
     MAGENTA 5 CYAN 6 PINK 218 ORANGE 214 DARK_ORANGE3 166 \
   )
 
-  C_OFF=`tput sgr0`   # Reset attribute
+  C_OFF="${ESC}[0m"   # Reset attribute
   # shellcheck disable=SC2034
-  C_BOLD=`tput bold`  # Bold mode
+  C_BOLD="${ESC}[1m"  # Bold mode
   # shellcheck disable=SC2034
-  C_REV=`tput rev`    # Reverse mode
+  C_REV="${ESC}[7m"   # Reverse mode
   # shellcheck disable=SC2034
-  C_UL=`tput smul`    # Underline mode
+  C_UL="${ESC}[4m"    # Underline mode
 
   for ((I=0; I<${#COLOR_MAP[@]}; I+=2)); do
-    eval "C_${COLOR_MAP[$I]}=\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
-    eval "C_B_${COLOR_MAP[$I]}=\`tput bold\`\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
-    eval "C_U_${COLOR_MAP[$I]}=\`tput smul\`\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
-    eval "C_R_${COLOR_MAP[$I]}=\`tput bold\`\`tput rev\`\`tput setaf ${COLOR_MAP[(($I + 1))]}\`"
+    NAME=${COLOR_MAP[$I]}
+    NUM=${COLOR_MAP[(($I + 1))]}
+    # SGR foreground: 0-7 -> 30-37 / 8-15 -> 90-97 / 16-255 -> 38;5;n
+    if (( NUM < 8 )); then
+      SGR="${ESC}[$(( 30 + NUM ))m"
+    elif (( NUM < 16 )); then
+      SGR="${ESC}[$(( 82 + NUM ))m"
+    else
+      SGR="${ESC}[38;5;${NUM}m"
+    fi
+    printf -v "C_${NAME}"   '%s' "$SGR"
+    printf -v "C_B_${NAME}" '%s' "${C_BOLD}${SGR}"
+    printf -v "C_U_${NAME}" '%s' "${C_UL}${SGR}"
+    printf -v "C_R_${NAME}" '%s' "${C_BOLD}${C_REV}${SGR}"
   done
 }
 #}}}
