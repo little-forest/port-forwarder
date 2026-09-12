@@ -443,6 +443,8 @@ _err_no_command()      { echo "required command '$1' not found. Install it and m
 _err_daemon_running()  { echo "daemon is already running (pid $1). Use '${__SCRIPT_NAME} down' to stop it."; }
 _err_no_daemon()       { echo "daemon is not running. Run '${__SCRIPT_NAME} up' to start it."; }
 _err_no_entry()        { echo "no such entry '$1'"; }
+_err_config_is_dir()   { echo "$1 is a directory. Specify the config file itself (e.g. $1/config.yaml)"; }
+_err_config_no_args()  { echo "'config' takes no arguments. Use '${__SCRIPT_NAME} --config <PATH> config --init' to choose where the file is created."; }
 #}}}
 
 #-------------------------------------------------------------------------------
@@ -868,6 +870,8 @@ _config_setup() { #{{{
 # generate a config file template (SPECS 4.5)
 _config_init() { #{{{
   local PATH_=$1 FORCE=$2 DIR
+  # checked before --force so that 'cat > <dir>' can never be reached
+  [[ -d "$PATH_" ]] && _error_exit "$_EXIT_ERROR" "$(_err_config_is_dir "$PATH_")"
   if [[ -e "$PATH_" && -z "$FORCE" ]]; then
     _error_exit "$_EXIT_ERROR" "config file already exists: ${PATH_}. Use --force to overwrite it."
   fi
@@ -911,6 +915,11 @@ PFWD_CONFIG_TEMPLATE
   chmod 600 "$PATH_" 2>/dev/null
   printf 'Created: %s\n' "$PATH_"
   printf "Edit the file and run '%s test' to validate.\n" "$__SCRIPT_NAME"
+  # a path outside the search order of _config_find needs -c on every run
+  if [[ "$PATH_" != "$(_config_user_path)" && "$PATH_" != '/etc/port-forwarder/config.yaml' ]]; then
+    printf "Note: this path is not searched automatically. Run '%s --config %s <subcommand>'.\n" \
+      "$__SCRIPT_NAME" "$PATH_"
+  fi
   return 0
 }
 #}}}
@@ -1956,13 +1965,18 @@ PFWD_HELP
 
 _help_config() { #{{{
   cat <<PFWD_HELP
-usage: ${__SCRIPT_NAME} config [--init [--force]]
+usage: ${__SCRIPT_NAME} [-c <PATH>] config [--init [--force]]
 
 With no option, show the path of the config file in use.
 
 options:
   --init        create a template config file
   --force       overwrite an existing file (with --init)
+
+The file is created at \$XDG_CONFIG_HOME/port-forwarder/config.yaml (or
+~/.config/port-forwarder/config.yaml). Give -c, --config <PATH> before the
+subcommand to create it somewhere else; that path is not searched
+automatically, so pass -c again when running ${__SCRIPT_NAME}.
 PFWD_HELP
 }
 #}}}
@@ -2044,6 +2058,8 @@ _cmd_list() { #{{{
 
 _cmd_config() { #{{{
   local OPT TARGET F INIT='' FORCE=''
+  # the destination is given with -c/--config, never as a positional argument
+  (( ${#_ARGS[@]} > 0 )) && _usage "$(_err_config_no_args)"
   for OPT in "${_SUBCMD_OPTS[@]}"; do
     case "$OPT" in
       --init)  INIT=yes ;;
