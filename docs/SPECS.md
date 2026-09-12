@@ -61,7 +61,8 @@ usable at all times.
 | --- | --- | --- |
 | `bash` (4.2 or later) | Runtime | Linux: standard / macOS: `brew install bash` (associative arrays and `declare -g` are used to hold config and state, so versions older than 4.2 will not work. This is checked at startup and the tool exits with code 7 if unmet) |
 | `ssh` (OpenSSH 7.4+) | The forwarding itself | Standard on both OSes |
-| `yq` (mikefarah/yq v4 series) | Parsing the config file (YAML) | Assumed to be installed and on `PATH` (installation instructions are out of scope for this design) |
+| `yq` (mikefarah/yq 4.31+ **or** kislyuk/yq 2.14+) | Parsing the config file (YAML) | Assumed to be installed and on `PATH` (installation instructions are out of scope for this design) |
+| `jq` (1.5 or later) | Only required when the above is kislyuk/yq | kislyuk/yq is a wrapper around jq and cannot parse anything without it |
 | `nc` or bash `/dev/tcp` | Reachability check of the local port | Standard (falls back to `/dev/tcp` when `nc` is absent) |
 | `awk` / `sed` / `grep` | Output formatting | Standard on both OSes |
 | `date` / `sleep` / `kill` | Monitoring loop | Standard on both OSes |
@@ -69,11 +70,26 @@ usable at all times.
 > No dependency on extra commands such as `ss` or `lsof`. If present, they are optionally used to
 > improve the accuracy of diagnostic information.
 
-`yq` is assumed to be **mikefarah/yq v4 or later** (the Go implementation). Installing it and setting
-`PATH` is the user's responsibility; this tool neither guides the installation nor detects the version
-automatically.
-If it is not installed, the tool exits with a command-not-found error just like any other missing
-dependency (exit code 7).
+`yq` may be **either mikefarah/yq (the Go implementation) or kislyuk/yq (the Python implementation,
+a wrapper around jq)**. The very same queries are handed to both, so no implementation detection
+happens on the normal path (not even `yq --version` is spawned).
+
+- The implementation is identified **only when parsing has already failed**. If it is kislyuk/yq and
+  `jq` is missing, the tool exits with a `jq`-not-found error (exit code 7). An implementation that
+  matches neither (such as the `yq read` syntax of v3) exits with `unsupported yq implementation`
+  (also 7).
+- The verified floor is **mikefarah/yq 4.31** and **kislyuk/yq 2.14 (with jq 1.5)**. The code does
+  not check versions, though: below the floor, yq itself reports a syntax error and pfwd surfaces it
+  as a parse failure with exit code 3.
+- Installing it and setting `PATH` is the user's responsibility; this tool does not guide the
+  installation. If it is not installed, the tool exits with a command-not-found error just like any
+  other missing dependency (exit code 7).
+- `pfwd test` prints the implementation and version it recognized on a `yq:` line (6.4).
+
+**Numeric literal notation**: for numbers that are not in canonical form — `port: 022`, `x: 1.50`,
+`x: 1e3` — mikefarah/yq returns them verbatim (`022` / `1.50` / `1e3`) while kislyuk/yq returns them
+reformatted as numbers (`22` / `1.5` / `1000.0`). This is a difference between the YAML parsers and
+is not papered over. **Quote any value that is meant to be a string.**
 
 ### 2.2 SSH-side prerequisites
 
@@ -253,6 +269,8 @@ with a warning and the other entries continue to be processed.
 - The specified `identity` file has permissions open to other users (rejected up front because `ssh`
   itself would refuse it)
 - `bind_address` is `0.0.0.0` / `::` (warning only, processing continues)
+- A key holds a value containing a **newline** or **0x1f** (Unit Separator), which collide with the
+  internal delimiter. Note that **a tab in a value is allowed** and does not disable the entry
 
 In the following cases the whole config is treated as an error and the tool exits immediately
 (exit code 3).
@@ -441,6 +459,7 @@ Validates the config and connectivity without establishing forwards.
 ```console
 $ pfwd test
 Config: /home/komori/.config/port-forwarder/config.yaml
+yq:     mikefarah/yq v4.53.3
 
 [  OK  ] db-prod    config valid, ssh reachable, local port free
 [  OK  ] redis-stg  config valid, ssh reachable, local port free
@@ -452,6 +471,11 @@ Config: /home/komori/.config/port-forwarder/config.yaml
 
 The summary line counts `[  OK  ]` as passed, `[ WARN ]` as warning and `[FAILED]` as failed (each
 entry is counted in exactly one of them).
+
+The `yq:` line shows the yq implementation and version that was recognized (2.1). For kislyuk/yq it
+reads `kislyuk/yq 4.1.2 (jq-1.8.2)`; when neither implementation matches, the first line of
+`--version` is shown verbatim. `test` is a diagnostic command, so an unsupported implementation is
+only reported here rather than being treated as a fatal error.
 
 ### 6.5 Logging
 
@@ -580,6 +604,7 @@ Every message contains all three of "**what happened / why / what to do about it
 | Host key not registered | `error: [db-prod] host key for bastion.example.com is not in known_hosts. Run: ssh-keyscan -H bastion.example.com >> ~/.ssh/known_hosts` |
 | Bad key file permissions | `error: [db-prod] identity file ~/.ssh/id_ed25519 has too open permissions (0644). Run: chmod 600 ~/.ssh/id_ed25519` |
 | Missing dependency | `error: required command 'yq' not found. Install it and make sure it is in your PATH.` |
+| Unsupported yq implementation | `error: unsupported yq implementation: yq version 3.4.1. pfwd supports mikefarah/yq 4.31+ (https://github.com/mikefarah/yq) and kislyuk/yq 2.14+ with jq (https://github.com/kislyuk/yq).` |
 | Daemon double start | `error: daemon is already running (pid 48120). Use 'pfwd down' to stop it.` |
 | Unknown entry name | `error: no such entry 'db-pord'` |
 | Config destination is a directory | `error: /home/komori/work is a directory. Specify the config file itself (e.g. /home/komori/work/config.yaml)` |

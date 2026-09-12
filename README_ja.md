@@ -23,7 +23,8 @@ metrics     retrying    127.0.0.1:19090  prom.internal:9090           -         
 | --- | --- | --- | --- |
 | `bash` | 4.2 以上 | ✔ | macOS 標準の bash 3.2 では動作しない（`brew install bash`）。満たさない場合は終了コード 7 |
 | `ssh` | OpenSSH 7.4 以上 | ✔ | 両 OS 標準 |
-| `yq` | mikefarah/yq v4 系 | ✔ | Go 実装のもの。同名の Python 実装では動作しない |
+| `yq` | mikefarah/yq 4.31 以上 **または** kislyuk/yq 2.14 以上 | ✔ | Go 実装・Python 実装のどちらでも動作する |
+| `jq` | 1.5 以上 | | `yq` が kislyuk/yq（Python 実装）のときのみ必須 |
 | `nc` | - | | 任意。無い場合は bash の `/dev/tcp` を使う |
 
 対応 OS は RedHat 系 Linux（RHEL / Rocky / AlmaLinux / Fedora）と macOS。
@@ -320,7 +321,9 @@ $ pfwd logs db-prod     # 該当エントリの行のみ抽出
 | 症状・メッセージ | 対処 |
 | --- | --- |
 | `bash 4.2 or later is required` | macOS 標準の bash 3.2 で実行している。`brew install bash` を実行する |
-| `required command 'yq' not found` | mikefarah/yq v4 を導入し、PATH を通す |
+| `required command 'yq' not found` | mikefarah/yq 4.31 以上、または kislyuk/yq 2.14 以上を導入し、PATH を通す |
+| `required command 'jq' not found` | kislyuk/yq（Python 実装）は jq のラッパーなので、jq も導入する |
+| `unsupported yq implementation: ...` | mikefarah/yq でも kislyuk/yq でもない `yq`（`yq read` 構文の v3 など）が PATH にある。対応するどちらかに入れ替える。`pfwd test` の `yq:` 行で認識結果を確認できる |
 | `host key for ... is not in known_hosts` | `ssh-keyscan -H <ホスト> >> ~/.ssh/known_hosts` で登録する |
 | `identity file ... has too open permissions` | `chmod 600 <鍵ファイル>` を実行する |
 | `local port ... is already in use by another process` | 他プロセスが使用中。`local_port` を変更するか、そのプロセスを止める。このエントリは再試行せず `failed` になる |

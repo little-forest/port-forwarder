@@ -266,3 +266,32 @@ EOF
   set -e
   [[ "$output" == *"yq:     kislyuk/yq 4.1.2 (jq-1.8.2)"* ]]
 }
+
+#-------------------------------------------------------------------------------
+# 両実装の突き合わせ (kislyuk/yq が用意されているときだけ実行する任意テスト)
+#
+#   PFWD_YQ_PYTHON=/path/to/venv/bin/yq bats test/test_yq.bats
+#-------------------------------------------------------------------------------
+@test "yq: 両実装で pfwd list の出力がバイト単位で一致する" {
+  [[ -n "$PFWD_YQ_PYTHON" ]] || skip 'PFWD_YQ_PYTHON に kislyuk/yq のパスを渡したときのみ実行する'
+  [[ -x "$PFWD_YQ_PYTHON" ]] || skip "PFWD_YQ_PYTHON=${PFWD_YQ_PYTHON} が実行できない"
+  command -v jq >/dev/null 2>&1 || skip 'kislyuk/yq には jq が必要'
+
+  local DIR="${BATS_TEST_TMPDIR}/pyyq" F GO PY
+  mkdir -p "$DIR"
+  ln -sf "$PFWD_YQ_PYTHON" "${DIR}/yq"
+
+  set +e
+  for F in "${FIXTURES}"/*.yaml; do
+    GO=$("$PFWD" list -c "$F" 2>&1; printf 'rc=%s' "$?")
+    PY=$(env PATH="${DIR}:${PATH}" "$PFWD" list -c "$F" 2>&1; printf 'rc=%s' "$?")
+    # YAML 構文エラーの文言だけは yq 自身のものなので比較対象から外す (設計 決定 #16)
+    [[ "$GO" == *'failed to parse'* ]] && continue
+    if [[ "$GO" != "$PY" ]]; then
+      set -e
+      printf 'mismatch on %s\n--- mikefarah ---\n%s\n--- kislyuk ---\n%s\n' "$F" "$GO" "$PY" >&2
+      return 1
+    fi
+  done
+  set -e
+}

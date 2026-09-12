@@ -215,19 +215,40 @@ bash 4 の連想配列に平坦化して保持する。キーは `<エントリ�
 
 #### yq の呼び出し
 
-**設定ファイル 1 つあたり 4 回**の `yq` 呼び出しで全情報を取得する。エントリごとの呼び出しは行わない（SPECS 11 章の起動時間要件のため）。
+**設定ファイル 1 つあたり 5 回**の `yq` 呼び出しで全情報を取得する。エントリごとの呼び出しは行わない（SPECS 11 章の起動時間要件のため）。
+
+`yq` は mikefarah/yq（Go 実装）と kislyuk/yq（Python 実装。jq のラッパー）の両方に対応するが、
+**クエリ文字列は 1 本しか持たず、実装による分岐も前置きも行わない**。これを成立させるための約束が 2 つある。
+
+- 型の取得には両実装が共通して持つ **`type`** を使う（`tag` は jq に無い）。
+- クエリ内に型名の文字列（`"!!map"` / `"object"`）を**書かない**。型の判定は
+  `select((.value | type) == ({} | type))` のように**リテラルの型と比較**する。こうすると戻り値の
+  表記が実装ごとに違っても式の意味が変わらない。
+- 後置の `to_entries[]` は mikefarah v4.35 以前で構文エラーになるため、**`to_entries | .[]`** と書く。
+
+`<US>` は 0x1f（`_US`）のリテラル 1 バイト。区切りに `@tsv` を使わないのは、タブ・改行・null の
+扱いが実装ごとに食い違うため（`join` ならどちらも生のまま通す）。
 
 | # | 目的 | クエリ |
 | --- | --- | --- |
-| 0 | 構造検証 | `yq -r '.entries \| tag' FILE` → `!!map` 以外は終了コード 3 |
-| 1 | エントリ名（記述順） | `yq -r '.entries \| keys \| .[]' FILE` |
-| 2 | global | `yq -r '.global // {} \| to_entries[] \| [.key, .value] \| @tsv' FILE` |
-| 3 | エントリのスカラー値 | `yq -r '.entries \| to_entries[] \| .key as $n \| .value \| to_entries[] \| select((.value \| tag) != "!!seq" and (.value \| tag) != "!!map") \| [$n, .key, .value] \| @tsv' FILE` |
-| 4 | `ssh_options`（配列） | `yq -r '.entries \| to_entries[] \| .key as $n \| (.value.ssh_options // []) \| .[] \| [$n, .] \| @tsv' FILE` |
+| 0 | 構造検証 | `.entries \| type` → `map` / `null` 以外は終了コード 3 |
+| 1 | エントリ名（記述順）と値の型 | `(.entries // {}) \| to_entries \| .[] \| [.key, (.value \| type)] \| join("<US>")` |
+| 2 | global | `(.global // {}) \| to_entries \| .[] \| select((.value\|type) != ([]\|type) and (.value\|type) != ({}\|type)) \| [.key, .value] \| join("<US>")` |
+| 3 | エントリのスカラー値 | `(.entries // {}) \| to_entries \| .[] \| select((.value\|type) == ({}\|type)) \| .key as $n \| .value \| to_entries \| .[] \| select((.value\|type) != ([]\|type) and (.value\|type) != ({}\|type)) \| [$n, .key, .value] \| join("<US>")` |
+| 4 | `ssh_options`（配列） | `(.entries // {}) \| to_entries \| .[] \| select((.value\|type) == ({}\|type)) \| select(((.value.ssh_options // []) \| type) == ([]\|type)) \| select(((.value.ssh_options // []) \| length) > 0) \| .key as $n \| (.value.ssh_options // []) \| .[] \| [$n, .] \| join("<US>")` |
 
-- `yq` の終了コードが 0 以外なら、stderr をそのままユーザーに提示して終了コード 3。
-- 読み込みは `while IFS=$'\t' read -r ...` で行い、パイプによるサブシェル化を避けるためプロセス置換（`done < <(...)`）を使う。
-- 値にタブが含まれると列がずれるため、`@tsv` の出力で列数が想定と異なる行は該当エントリの検証エラーとする。
+- クエリ 0 の終了コードが 0 以外なら、`_yq_diagnose` で yq 側に原因があるかを切り分けたうえで
+  （7.2）、stderr をそのままユーザーに提示して終了コード 3。
+- `type` の戻り値は実装ごとに表記が違う（mikefarah は `!!map` などの YAML タグ、kislyuk は
+  `object` などの jq 型名）。**bash 側の `_yq_kind` で `map` / `seq` / `str` / `number` / `bool` /
+  `null` に正規化**してから表示・分岐に使う。空出力も `null` とみなす（空ファイルの吸収を兼ねる）。
+  ループ内で `$( )` を起こさないよう、分岐には述語 `_yq_is_map` / `_yq_is_null` を使う。
+- 読み込みは `while IFS=$_US read -r ...` で行い、パイプによるサブシェル化を避けるためプロセス置換
+  （`done < <(...)`）を使う。
+- 区切りの数が想定と違う行は、**多い → 値に 0x1f が入っている / 少ない → 直前の値が複数行**、と
+  切り分けて該当エントリを検証エラーにする。継続行の文字列をエントリ名と取り違えないよう、直前の
+  エントリ名・キー名をループ内で持ち回す。
+- 値のタブは列をずらさないので、**タブを含む値は許容する**（SPECS 4.4）。
 
 #### マージ規則の実装（SPECS 4.1）
 
@@ -358,7 +379,12 @@ host / user / port / identity / local_port / remote_host / remote_port / bind_ad
 | `_config_find` | `--config` → `$XDG_CONFIG_HOME/port-forwarder/config.yaml` → `~/.config/...` → `/etc/port-forwarder/config.yaml` の順で探索し `_CONFIG_FILE` を決定。見つからなければ終了コード 3 |
 | `_config_file_list` | メイン設定 + 同階層 `conf.d/*.yaml`・`*.yml` を名前順で並べた配列 `_CONFIG_FILES` を作る |
 | `_config_load` | `_CONFIG_FILES` を順に `_config_parse_file` に渡し、4.1 節のマージ規則で `_CFG` を構築する |
-| `_config_parse_file <path>` | 4.1 節の yq クエリ 0〜4 を実行し、TSV を読み込む |
+| `_config_parse_file <path>` | 4.1 節の yq クエリ 0〜4 を実行し、0x1f 区切りの行を読み込む |
+| `_yq_kind <type 出力>` | `type` の戻り値を `map` / `seq` / `str` / `number` / `bool` / `null` に正規化する。空出力は `null` |
+| `_yq_is_map <type 出力>` | マップなら真。ループ内で `$( )` を避けるための述語 |
+| `_yq_is_null <type 出力>` | null または空出力なら真 |
+| `_yq_detect` | `yq --version` から実装（`go` / `python` / `unknown`）と表示用バージョンを `_YQ_IMPL` / `_YQ_VERSION` に入れる。冪等で、**終了はしない** |
+| `_yq_diagnose` | クエリが失敗したときにだけ呼ぶ。Python 実装で `jq` が無ければ `_EXIT_DEPS`、未知の実装なら `_EXIT_DEPS`。それ以外は 0 を返し、呼び出し元が終了コード 3 で終了する |
 | `_config_apply_defaults` | 4.2 節 |
 | `_config_validate` | 4.3 節 |
 | `_config_check_perms` | 設定ファイルが他ユーザーから書き込み可能なら警告（SPECS 11 章） |
@@ -851,6 +877,15 @@ readonly _EXIT_DEPS=7          # 依存コマンド不足
 
 `yq` のバージョン判定は行わない（SPECS 2.1 の方針）。
 
+**yq 実装の判定はここでは行わない。** クエリは両実装に共通なので（4.1）、正常時に判定する理由が無く、
+`_check_prerequisites` で `yq --version` を起動すると起動時間の要件（8 章）に無駄が乗るだけになる。
+判定は次の 2 箇所だけで走る。
+
+| 契機 | 呼ぶもの | ふるまい |
+| --- | --- | --- |
+| クエリ 0 が非 0 で終了した | `_yq_diagnose` | Python 実装なら `command -v jq` も確認する。`jq` が無い／未知の実装なら `_EXIT_DEPS`。それ以外は解析失敗（終了コード 3）として報告する |
+| `pfwd test` | `_yq_detect` | 判定結果を `yq:` 行に表示するだけで、未知の実装でも終了しない |
+
 ### 7.3 エラーメッセージの集約
 
 SPECS 10 章の全パターンを `_err_*` 関数として定義し、メッセージ文字列をコード中に散在させない。
@@ -891,10 +926,15 @@ _err_config_no_args() { echo "'config' takes no arguments. Use 'pfwd --config <P
 
 | 要件（SPECS 11 章） | 実装上の担保 |
 | --- | --- |
-| `pfwd status` が 1 秒以内（50 エントリ） | 外部コマンド起動を「yq × 設定ファイル数（通常 4〜8 回）」に限定する。state の読み取りは bash 組み込みのみ。デーモン起動中は ssh を 1 回も起動しない |
+| `pfwd status` が 1 秒以内（50 エントリ） | 外部コマンド起動を「yq × 設定ファイル数（通常 5〜10 回）」に限定する。state の読み取りは bash 組み込みのみ。デーモン起動中は ssh を 1 回も起動しない |
 | 平常時 CPU ほぼ 0%（30 秒間隔・10 エントリ） | ループ本体は `sleep 1` と数十回の算術比較のみ。監視が起きるサイクルでのみプローブを実行する。`date` は `printf '%(%s)T'` に置き換える |
 | 100 エントリまで動作保証 | `next_check_at` の分散初期化と `_MAX_CHECKS_PER_TICK=20` により、1 サイクルの所要時間を有界にする |
 | 復旧時間 ≤ `check_interval + retry_initial` | 監視周期 1 秒でタイマを評価するため、検知遅延は最大 1 秒。`next_check_at` 到達 → 即 `_ssh_stop` → `next_retry_at = now + retry_initial` で要件内に収まる |
+
+yq 実装の判定（`_yq_detect`）は**正常経路の外部コマンド起動数を増やさない**。判定が走るのは解析に
+失敗したときと `pfwd test` だけで、`status` / `list` / `up` などは `yq --version` を 1 回も起動しない
+（7.2）。`_yq_kind` はループの外でしか呼ばず、ループ内の型判定は述語 `_yq_is_map` / `_yq_is_null` で
+行う（サブシェルを起こさないため）。
 
 ---
 
@@ -916,6 +956,16 @@ _err_config_no_args() { echo "'config' takes no arguments. Use 'pfwd --config <P
 
 bats-core を用いる。`PFWD_SOURCE_ONLY=1 source ./pfwd` で関数だけを読み込み、外部依存（ssh / yq / デーモン）はテスト用の関数で差し替える。
 
+yq まわりは実 yq に依存しない形で検証する。
+
+- 型名の正規化（`_yq_kind` / `_yq_is_map` / `_yq_is_null`）は純粋な関数として直接呼ぶ。
+- 実装判定（`_yq_detect` / `_yq_diagnose`）は、`--version` の出力を返すだけの `yq` スタブを PATH の
+  先頭に置いて確認する。冪等性はスタブにカウンタを持たせて起動回数で見る。
+- **正常時に `--version` が 1 回も起動しないこと**（7.2 の方針の核心）も、カウンタ付きスタブ越しに
+  `pfwd list` を通して回数で確認する。
+- 両実装の突き合わせは任意テストとし、`PFWD_YQ_PYTHON` に kislyuk/yq のパスが渡されたときだけ走る。
+  全 fixture について `pfwd list` の出力がバイト単位で一致することを見る。
+
 ### 10.1 構成
 
 ```
@@ -925,8 +975,10 @@ test/
 │   ├── basic.yaml           SPECS 4.2 の例そのまま
 │   ├── confd/*.yaml         マージ検証用
 │   ├── invalid_syntax.yaml  YAML 構文エラー
-│   └── dup_port.yaml        local_port 重複
+│   ├── dup_port.yaml        local_port 重複
+│   └── yq_edge.yaml         yq 実装差の境界（null / タブ / 改行 / global の混在型）
 ├── test_config.bats
+├── test_yq.bats             yq 実装の判定と型名の正規化（スタブで検証）
 ├── test_validate.bats
 ├── test_state.bats
 ├── test_statemachine.bats
@@ -940,6 +992,7 @@ test/
 | ファイル | 検証内容 |
 | --- | --- |
 | `test_config` | 探索順の優先順位 / `conf.d` の名前順マージ / global のキー単位後勝ち / entries のエントリ単位置換 / 記述順の保持 / `~` 展開 / `ssh_options` の配列読み込み / 既定値の適用 |
+| `test_yq` | `_yq_kind` の正規化（両実装の表記＋空出力） / `_yq_is_map`・`_yq_is_null` の真偽 / `yq` スタブによる `_yq_detect` の分類と冪等性 / `_yq_diagnose` の終了コード 7（jq 不在・未知の実装） / 正常時に `--version` が起動しないこと / `pfwd test` の `yq:` 行 / `PFWD_YQ_PYTHON` があるときだけ走る両実装の突き合わせ |
 | `test_validate` | 必須キー欠落 / ポート範囲外 / `local_port` 重複（両方無効化） / 不正なエントリ名 / 未知キーは警告のみ / `check_mode` 不正 / `enabled` の各表記 / 構文エラーで終了コード 3 / `entries` 空で終了コード 3 |
 | `test_state` | state のアトミック書き込み / 読み書きの往復 / desired の既定値（ファイル無し時は `enabled` に従う） / `_state_transit` がログを 1 行出すこと |
 | `test_statemachine` | `_daemon_tick_entry` を `_ssh_*` / `_health_check` のスタブと組み合わせ、SPECS 5.1 の全遷移を検証。バックオフ列（5→10→20→…→300 で頭打ち） / 60 秒継続でのリセット / `retry_limit` 到達で `failed` / ポート使用中で即 `failed` |

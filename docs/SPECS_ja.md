@@ -57,15 +57,28 @@
 | --- | --- | --- |
 | `bash` (4.2 以上) | 実行環境 | Linux: 標準 / macOS: `brew install bash`（設定・状態の保持に連想配列と `declare -g` を使うため 4.2 未満では動作しない。起動時に判定し、満たさなければ終了コード 7 で終了する） |
 | `ssh` (OpenSSH 7.4+) | フォワーディング本体 | 両 OS 標準 |
-| `yq` (mikefarah/yq v4 系) | 設定ファイル（YAML）の解析 | 導入済みかつ PATH が通っていることを前提とする（導入手順は本設計のスコープ外） |
+| `yq` (mikefarah/yq 4.31 以上 **または** kislyuk/yq 2.14 以上) | 設定ファイル（YAML）の解析 | 導入済みかつ PATH が通っていることを前提とする（導入手順は本設計のスコープ外） |
+| `jq` (1.5 以上) | 上記が kislyuk/yq のときのみ必要 | kislyuk/yq は jq のラッパーであり、jq が無いと解析できない |
 | `nc` または `bash /dev/tcp` | ローカルポートの疎通確認 | 標準（`nc` が無い場合は `/dev/tcp` にフォールバック） |
 | `awk` / `sed` / `grep` | 出力整形 | 両 OS 標準 |
 | `date` / `sleep` / `kill` | 監視ループ | 両 OS 標準 |
 
 > `ss`・`lsof` などの追加コマンドには依存しない。存在すれば診断情報の精度向上に利用する（任意）。
 
-`yq` は **mikefarah/yq v4 以上**（Go 実装）を前提とする。導入・PATH 設定は利用者の責任範囲とし、本ツールでは導入手順の案内やバージョンの自動判定は行わない。
-未導入の場合は他の依存コマンドと同様、コマンドが見つからない旨のエラーで終了する（終了コード 7）。
+`yq` は **mikefarah/yq（Go 実装）と kislyuk/yq（Python 実装。jq のラッパー）の両方**に対応する。
+どちらに対しても**同一のクエリ**を渡すため、通常時は実装の判定を行わない（`yq --version` も起動しない）。
+
+- 解析に**失敗したときにだけ**実装を判定する。kislyuk/yq と判定できて `jq` が無ければ、`jq` が見つからない旨のエラーで終了する（終了コード 7）。
+  どちらとも判定できない実装（`yq read` 構文の v3 など）は `unsupported yq implementation` で終了する（同 7）。
+- 動作を確認している下限は **mikefarah/yq 4.31**・**kislyuk/yq 2.14（＋ jq 1.5）**。ただしコードでのバージョン検査は行わない。
+  下限を下回る環境では yq 自身が構文エラーを返し、解析失敗として終了コード 3 で報告される。
+- 導入・PATH 設定は利用者の責任範囲とし、本ツールでは導入手順の案内は行わない。
+  未導入の場合は他の依存コマンドと同様、コマンドが見つからない旨のエラーで終了する（終了コード 7）。
+- `pfwd test` は、認識している実装とバージョンを `yq:` 行に表示する（6.4）。
+
+**数値リテラルの表記差**: `port: 022` / `x: 1.50` / `x: 1e3` のような正規形でない数値は、mikefarah/yq が原文のまま
+（`022` / `1.50` / `1e3`）、kislyuk/yq が数値として再整形した形（`22` / `1.5` / `1000.0`）を返す。これは YAML パーサの
+解釈差であり本ツールでは吸収しない。**文字列として扱いたい値は引用符で囲むこと。**
 
 ### 2.2 SSH 側の前提
 
@@ -232,6 +245,8 @@ entries:
 - 指定された `identity` ファイルが存在しない
 - 指定された `identity` ファイルの権限が他ユーザーに開いている（`ssh` 自身が拒否するため事前に弾く）
 - `bind_address` が `0.0.0.0` / `::`（警告のみ、動作は継続）
+- 値に**改行**または **0x1f**（Unit Separator）を含むキーがある（内部の区切り文字と衝突するため）。
+  なお**タブを含む値は許容する**（無効化の対象ではない）
 
 以下の場合は設定全体のエラーとして即座に終了する（終了コード 3）。
 
@@ -401,6 +416,7 @@ $ pfwd start metrics
 ```console
 $ pfwd test
 Config: /home/komori/.config/port-forwarder/config.yaml
+yq:     mikefarah/yq v4.53.3
 
 [  OK  ] db-prod    config valid, ssh reachable, local port free
 [  OK  ] redis-stg  config valid, ssh reachable, local port free
@@ -411,6 +427,10 @@ Config: /home/komori/.config/port-forwarder/config.yaml
 ```
 
 集計行は `[  OK  ]` を passed、`[ WARN ]` を warning、`[FAILED]` を failed として数える（1 エントリはいずれか 1 つに数えられる）。
+
+`yq:` 行には認識した yq の実装とバージョンを表示する（2.1）。kislyuk/yq のときは `kislyuk/yq 4.1.2 (jq-1.8.2)`、
+どちらとも判定できないときは `--version` の 1 行目をそのまま表示する。`test` は診断用のコマンドなので、
+未対応の実装であってもここでは終了せず表示に留める。
 
 ### 6.5 ログ
 
@@ -521,6 +541,7 @@ Run the following to enable:
 | ホスト鍵未登録 | `error: [db-prod] host key for bastion.example.com is not in known_hosts. Run: ssh-keyscan -H bastion.example.com >> ~/.ssh/known_hosts` |
 | 鍵ファイル権限不正 | `error: [db-prod] identity file ~/.ssh/id_ed25519 has too open permissions (0644). Run: chmod 600 ~/.ssh/id_ed25519` |
 | 依存コマンド不足 | `error: required command 'yq' not found. Install it and make sure it is in your PATH.` |
+| yq 実装が未対応 | `error: unsupported yq implementation: yq version 3.4.1. pfwd supports mikefarah/yq 4.31+ (https://github.com/mikefarah/yq) and kislyuk/yq 2.14+ with jq (https://github.com/kislyuk/yq).` |
 | デーモン二重起動 | `error: daemon is already running (pid 48120). Use 'pfwd down' to stop it.` |
 | 未知のエントリ名 | `error: no such entry 'db-pord'` |
 | 設定ファイル作成先がディレクトリ | `error: /home/komori/work is a directory. Specify the config file itself (e.g. /home/komori/work/config.yaml)` |

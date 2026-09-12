@@ -2,7 +2,7 @@
 title: kislyuk/yq (Python 実装) でも設定ファイルを解析できるようにする
 created: 2026-09-12
 updated: 2026-09-13
-status: 実装中
+status: 実装済み
 ---
 
 # 要求
