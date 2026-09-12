@@ -157,3 +157,48 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *'example'* ]]
 }
+
+@test "config: config --init に位置引数を渡すと終了コード 2 で拒否される" {
+  local TARGET="${BATS_TEST_TMPDIR}/pos/x.yaml"
+  local XDG="${BATS_TEST_TMPDIR}/pos-xdg"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" config --init "$TARGET"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'config' takes no arguments"* ]]
+  # 指定先にも既定パスにもファイルが作られていないこと
+  [ ! -e "$TARGET" ]
+  [ ! -e "${XDG}/port-forwarder/config.yaml" ]
+}
+
+@test "config: 引数なしの config に位置引数を渡しても終了コード 2 になる" {
+  run "$PFWD" config "${BATS_TEST_TMPDIR}/x.yaml"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'config' takes no arguments"* ]]
+}
+
+@test "config: 保存先がディレクトリなら --force の有無によらずエラーになる" {
+  local DIR="${BATS_TEST_TMPDIR}/asdir"
+  mkdir -p "$DIR"
+  run "$PFWD" --config "$DIR" config --init
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"${DIR} is a directory"* ]]
+  # --force でも cat > <dir> に到達せず同じエラーになること
+  run "$PFWD" --config "$DIR" config --init --force
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"${DIR} is a directory"* ]]
+}
+
+@test "config: 既定外パスに作成すると Note 行が出る" {
+  local TARGET="${BATS_TEST_TMPDIR}/note/pfwd.yaml"
+  run "$PFWD" --config "$TARGET" config --init
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Note: this path is not searched automatically"* ]]
+  [[ "$output" == *"--config ${TARGET}"* ]]
+}
+
+@test "config: 既定パスに作成すると Note 行は出ない" {
+  local XDG="${BATS_TEST_TMPDIR}/default-xdg"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" config --init
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Created: ${XDG}/port-forwarder/config.yaml"* ]]
+  [[ "$output" != *'Note:'* ]]
+}

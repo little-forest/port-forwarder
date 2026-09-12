@@ -104,6 +104,16 @@ Created: /home/komori/.config/port-forwarder/config.yaml
 Edit the file and run 'pfwd test' to validate.
 ```
 
+To create it somewhere else, pass `-c, --config <PATH>` before `config`. Such a path is not
+searched automatically, so `-c` is needed on subsequent runs as well.
+
+```console
+$ pfwd --config ~/work/pfwd.yaml config --init
+Created: /home/komori/work/pfwd.yaml
+Edit the file and run 'pfwd test' to validate.
+Note: this path is not searched automatically. Run 'pfwd --config /home/komori/work/pfwd.yaml <subcommand>'.
+```
+
 ### 2. Edit the config file
 
 The `example` entry in the template has `enabled: false`. Rewrite it for your own destination and set `enabled: true`.
@@ -250,7 +260,7 @@ pfwd <subcommand> [options] [entry...]
 | `test [name...]` | Validate the config and check connectivity (no forward is created) |
 | `install-service` | Generate and register a systemd unit (Linux only) |
 | `uninstall-service` | Remove the systemd unit (Linux only) |
-| `config` | Show the config file in use (`--init` writes a template) |
+| `config` | Show the config file in use (`--init` writes a template; `-c <PATH>` chooses where) |
 | `version` | Show the version |
 | `help [subcommand]` | Show help |
 
@@ -260,7 +270,7 @@ Run `pfwd help <subcommand>` for the options specific to each subcommand.
 
 | Option | Description |
 | --- | --- |
-| `-c, --config <PATH>` | Use the specified config file |
+| `-c, --config <PATH>` | Use the specified config file (with `config --init`, where the template is created) |
 | `-v, --verbose` | Verbose output to stderr (`-vv` for more) |
 | `-q, --quiet` | Suppress everything but errors |
 | `--no-color` | Disable colored output |

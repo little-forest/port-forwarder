@@ -103,6 +103,16 @@ Created: /home/komori/.config/port-forwarder/config.yaml
 Edit the file and run 'pfwd test' to validate.
 ```
 
+任意の場所に作りたいときは `-c, --config <PATH>` を `config` より前に付ける。ただしそのパスは
+自動では探索されないため、以降の実行でも `-c` が必要になる。
+
+```console
+$ pfwd --config ~/work/pfwd.yaml config --init
+Created: /home/komori/work/pfwd.yaml
+Edit the file and run 'pfwd test' to validate.
+Note: this path is not searched automatically. Run 'pfwd --config /home/komori/work/pfwd.yaml <subcommand>'.
+```
+
 ### 2. 設定ファイルを編集する
 
 雛形の `example` エントリは `enabled: false` になっている。自分の転送先に書き換えて `enabled: true` にする。
@@ -249,7 +259,7 @@ pfwd <サブコマンド> [オプション] [エントリ名...]
 | `test [名前...]` | 設定の妥当性検証と接続テスト（フォワードは張らない） |
 | `install-service` | systemd unit を生成・登録する（Linux のみ） |
 | `uninstall-service` | systemd unit の登録を解除する（Linux のみ） |
-| `config` | 使用中の設定ファイルパスを表示する（`--init` で雛形生成） |
+| `config` | 使用中の設定ファイルパスを表示する（`--init` で雛形生成。`-c <PATH>` で作成先を指定できる） |
 | `version` | バージョンを表示する |
 | `help [サブコマンド]` | ヘルプを表示する |
 
@@ -259,7 +269,7 @@ pfwd <サブコマンド> [オプション] [エントリ名...]
 
 | オプション | 説明 |
 | --- | --- |
-| `-c, --config <PATH>` | 使用する設定ファイルを指定する |
+| `-c, --config <PATH>` | 使用する設定ファイルを指定する（`config --init` では雛形の作成先になる） |
 | `-v, --verbose` | 詳細ログを標準エラー出力に出す（`-vv` でさらに詳細） |
 | `-q, --quiet` | エラー以外の出力を抑制する |
 | `--no-color` | 色付けを無効化する |

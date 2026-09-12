@@ -666,7 +666,7 @@ _daemon_shutdown:
 | `_cmd_test` | 設定検証 + `ssh -o BatchMode=yes -O none` ではなく、`ssh <共通オプション> -o ConnectTimeout=N <host> true` で到達性を確認し、`_is_port_free` でローカルポートを確認する。**フォワードは張らない**。結果を `[  OK  ]` / `[ WARN ]` / `[FAILED]` で表示し、失敗があれば終了コード 4 |
 | `_cmd_install_service` | macOS では非対応エラー。`--user`（既定） / `--system` / `--run-as` / `--now` を解析し、heredoc で unit を生成する |
 | `_cmd_uninstall_service` | unit を停止・disable してから削除する |
-| `_cmd_config` | `--init` / `--force` / 引数なし（パス表示） |
+| `_cmd_config` | `--init` / `--force` / 引数なし（パス表示）。位置引数は受け付けず、渡されたら `_usage` で終了コード 2 とする（既定パスへの意図しない作成を防ぐため）。`--init` の作成先は `_OPT_CONFIG` があればそれ（`_expand_tilde` 済み）、無ければ `_config_user_path`。作成先が `_config_find` の探索候補（`_config_user_path` / `/etc/port-forwarder/config.yaml`）以外なら、`_config_init` が `Note:` 行で以降も `-c` が要る旨を案内する |
 | `_cmd_version` / `_cmd_help` | `_VERSION` の表示、サブコマンド別ヘルプ |
 
 #### `_wait_result <name...> <期待状態> <タイムアウト>`
@@ -866,6 +866,8 @@ _err_no_command()     { echo "required command '$1' not found. Install it and ma
 _err_daemon_running() { echo "daemon is already running (pid $1). Use 'pfwd down' to stop it."; }
 _err_no_daemon()      { echo "daemon is not running. Run 'pfwd up' to start it."; }
 _err_no_entry()       { echo "no such entry '$1'"; }
+_err_config_is_dir()  { echo "$1 is a directory. Specify the config file itself (e.g. $1/config.yaml)"; }
+_err_config_no_args() { echo "'config' takes no arguments. Use 'pfwd --config <PATH> config --init' to choose where the file is created."; }
 ```
 
 ### 7.4 ssh 失敗理由の分類
