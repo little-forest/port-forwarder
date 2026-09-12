@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 #===============================================================================
 # pfwd : persistent SSH port forwarding
-# Date    :  2026-09-08 Start
-# Copyright: Original code by Yusuke Komori.
-#                       Copyright (c) 2026. Yusuke Komori, All rights reserved.
 #===============================================================================
 # shellcheck disable=SC2006
 
