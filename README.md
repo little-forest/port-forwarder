@@ -37,6 +37,39 @@ Three prerequisites on the SSH side:
 
 ## Installation
 
+Fetch and install the latest release of `pfwd` with a single line.
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/little-forest/port-forwarder/main/install.sh | bash
+```
+
+The default destination depends on the OS.
+
+| OS | Default destination | sudo |
+| --- | --- | --- |
+| Linux | `/usr/local/bin` | Switches to `sudo` automatically, and only when the directory is not writable |
+| macOS | `~/.local/bin` | Not needed |
+
+`~/.local/bin` is not part of the default PATH on macOS, so the installer tells you how to add it when it is missing.
+
+The installer honours these environment variables.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PFWD_INSTALL_DIR` | The per-OS default above | Destination directory |
+| `PFWD_VERSION` | The tag of the latest release | The ref to install. Set it to `main` to install the development version |
+| `NO_COLOR` | - | Disable colored output (<https://no-color.org/>) |
+
+```console
+$ curl -fsSL .../install.sh | PFWD_INSTALL_DIR=~/bin bash   # change the destination
+$ curl -fsSL .../install.sh | PFWD_VERSION=v1.0.0 bash      # pin a version
+$ curl -fsSL .../install.sh | PFWD_VERSION=main bash        # install the development version
+```
+
+Missing dependencies (`bash` 4.2 or later / `ssh` / `yq`) are reported as warnings only; the installation itself still succeeds.
+
+### Installing manually
+
 Just copy the single `pfwd` file. There is nothing to build.
 
 ```console
@@ -49,6 +82,17 @@ On macOS, install the dependencies first.
 ```console
 $ brew install bash yq
 ```
+
+### Uninstalling
+
+Just remove the file that was installed.
+
+```console
+$ rm -f ~/.local/bin/pfwd          # the macOS default
+$ sudo rm -f /usr/local/bin/pfwd   # the Linux default
+```
+
+The config files under `~/.config/port-forwarder/` are left behind; delete them too if you no longer need them.
 
 ## Quick start
 
@@ -290,7 +334,7 @@ The main exit codes are `0` (success), `1` (general runtime error), `2` (bad arg
 ```console
 $ bats test/                                    # unit tests
 $ PFWD_IT=1 bats test/test_integration.bats     # integration tests (needs sshd on localhost with key auth, and python3)
-$ shellcheck -x -s bash pfwd                    # static checks
+$ shellcheck -x -s bash pfwd install.sh         # static checks
 ```
 
 The test toolchain is managed with [aqua](https://aquaproj.github.io/) (`aqua.yaml`).

@@ -36,6 +36,39 @@ SSH 側の前提は以下の 3 点。
 
 ## インストール
 
+最新リリースの `pfwd` を 1 行で取得・配置する。
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/little-forest/port-forwarder/main/install.sh | bash
+```
+
+既定のインストール先は OS ごとに異なる。
+
+| OS | 既定のインストール先 | sudo |
+| --- | --- | --- |
+| Linux | `/usr/local/bin` | 書き込めない場合のみ自動で `sudo` に切り替わる |
+| macOS | `~/.local/bin` | 不要 |
+
+macOS の既定 PATH に `~/.local/bin` は含まれないため、PATH 未登録なら追加方法を案内する。
+
+インストーラは次の環境変数を見る。
+
+| 環境変数 | 既定値 | 意味 |
+| --- | --- | --- |
+| `PFWD_INSTALL_DIR` | 上表の OS 別既定 | インストール先ディレクトリ |
+| `PFWD_VERSION` | 最新リリースのタグ | 取得する ref。`main` を指定すると開発版が入る |
+| `NO_COLOR` | - | 色付き出力を無効化する（<https://no-color.org/>） |
+
+```console
+$ curl -fsSL .../install.sh | PFWD_INSTALL_DIR=~/bin bash   # 配置先を変える
+$ curl -fsSL .../install.sh | PFWD_VERSION=v1.0.0 bash      # バージョンを固定する
+$ curl -fsSL .../install.sh | PFWD_VERSION=main bash        # 開発版を入れる
+```
+
+依存コマンド（`bash` 4.2 以上 / `ssh` / `yq`）が不足していても、警告を出すだけでインストール自体は成功する。
+
+### 手動でインストールする
+
 `pfwd` 1 ファイルをコピーするだけでよい。ビルドは不要。
 
 ```console
@@ -48,6 +81,17 @@ macOS では依存コマンドを先に入れておく。
 ```console
 $ brew install bash yq
 ```
+
+### アンインストール
+
+配置したファイルを消すだけでよい。
+
+```console
+$ rm -f ~/.local/bin/pfwd          # macOS の既定
+$ sudo rm -f /usr/local/bin/pfwd   # Linux の既定
+```
+
+設定ファイル（`~/.config/port-forwarder/`）は残るので、不要なら併せて削除する。
 
 ## クイックスタート
 
@@ -289,7 +333,7 @@ $ pfwd logs db-prod     # 該当エントリの行のみ抽出
 ```console
 $ bats test/                                    # ユニットテスト
 $ PFWD_IT=1 bats test/test_integration.bats     # 統合テスト（localhost への鍵認証 sshd と python3 が必要）
-$ shellcheck -x -s bash pfwd                    # 静的検査
+$ shellcheck -x -s bash pfwd install.sh         # 静的検査
 ```
 
 テスト用ツールは [aqua](https://aquaproj.github.io/) で管理している（`aqua.yaml`）。

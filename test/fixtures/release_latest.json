@@ -1,0 +1,12 @@
+{
+  "url": "https://api.github.com/repos/little-forest/port-forwarder/releases/123456",
+  "id": 123456,
+  "tag_name": "v1.2.3",
+  "target_commitish": "main",
+  "name": "v1.2.3",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-09-12T00:00:00Z",
+  "published_at": "2026-09-12T00:00:00Z",
+  "body": "release notes with a fake \"tag_name\": \"v0.0.0\" inside"
+}

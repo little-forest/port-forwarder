@@ -13,6 +13,7 @@ Runs on both Linux (RedHat family) and macOS.
 
 ```
 pfwd                     Main script (single file, executable, ~2900 lines)
+install.sh               `curl | bash` installer (must run on bash 3.2)
 aqua.yaml                Test toolchain (managed by aqua, bats-core)
 IDEA.md                  Original requirements memo (Japanese)
 README.md / README_ja.md User-facing README
@@ -21,8 +22,10 @@ docs/
 ├── SPECS.md             English translation of the above
 └── DESIGN_ja.md         Internal design doc (implementation policy, data model, module design)
 test/
-├── helper.bash          Common bats setup
+├── helper.bash          Common bats setup (pfwd)
+├── helper_install.bash  Common bats setup (install.sh)
 ├── fixtures/*.yaml      Config files for tests
+├── fixtures/*.json      GitHub API responses for install.sh tests
 └── test_*.bats          bats tests
 ```
 
@@ -42,7 +45,7 @@ test/
 
 | Target | Language |
 | --- | --- |
-| Source comments in `pfwd` | English |
+| Source comments in `pfwd` / `install.sh` | English |
 | Comments in `test/` | Japanese |
 | User-facing output and error messages | English |
 | Commit messages | English (Conventional Commits + trailing emoji. e.g. `feat(cli): add status 🚀`) |
@@ -52,8 +55,9 @@ test/
 ```bash
 bats test/                                  # Unit tests
 PFWD_IT=1 bats test/test_integration.bats   # Integration tests (requires sshd on localhost + key auth + python3)
-shellcheck -x -s bash pfwd                  # Static analysis (keep at zero findings)
+shellcheck -x -s bash pfwd install.sh       # Static analysis (keep at zero findings)
 bash -n pfwd                                # Syntax check
+/bin/bash -n install.sh                     # Syntax check with the bash 3.2 that install.sh has to run on
 ```
 
 Test tooling is managed with [aqua](https://aquaproj.github.io/) (`aqua.yaml`).
@@ -83,6 +87,22 @@ Tests load only the function definitions with `PFWD_SOURCE_ONLY=1 source ./pfwd`
 Sourcing must always happen at file scope so that associative arrays do not become local variables
 (see `test/helper.bash`).
 
+### Installer (`install.sh`)
+
+`install.sh` is fetched and piped into bash (`curl -fsSL .../install.sh | bash`), which means it
+runs under whatever `/bin/bash` the user has — **on macOS that is 3.2**. None of the bash 4
+features `pfwd` itself depends on (associative arrays, `declare -g`, `${var^^}`,
+`printf '%(%s)T'`) may be used in this file. Verify with `/bin/bash -n install.sh` on macOS.
+
+- `main "$@"` is on the very last line, so a truncated download executes nothing.
+- It installs the tag of the latest GitHub release. **There is deliberately no fallback to `main`**;
+  installing an unreleased commit has to be opted into with `PFWD_VERSION=main`.
+- Destination defaults: Linux `/usr/local/bin`, macOS `~/.local/bin`. `PFWD_INSTALL_DIR` overrides
+  it; there is no command-line argument parsing, since environment variables are what survive a pipe.
+- Missing dependencies are warnings only and never abort the install.
+- The same bats-sourcing guard as `pfwd`, keyed off `PFWD_INSTALL_SOURCE_ONLY`
+  (see `test/helper_install.bash`).
+
 ### Runtime Layout
 
 Under `_RUN_DIR` (default in user mode: `${XDG_RUNTIME_DIR}/port-forwarder`) live
@@ -94,7 +114,8 @@ Directories are 0700 and files are 0600 (`umask 077`).
 ### Key Design Decisions
 
 - **bash 4.2 or later is required** (uses associative arrays and `declare -g`). It does not run on
-  the 3.2 bundled with macOS and exits with exit code 7.
+  the 3.2 bundled with macOS and exits with exit code 7. `install.sh` is the one exception — see
+  above.
 - Config and state are held in associative arrays; array elements are separated by `_US` (`$'\x1f'`).
 - Use the exit-code constants from SPECS chapter 7 (`_EXIT_OK`=0 / `_EXIT_ERROR`=1 / `_EXIT_USAGE`=2 /
   `_EXIT_CONFIG`=3 / `_EXIT_CONNECT`=4 / `_EXIT_NO_DAEMON`=5 / `_EXIT_RUNNING`=6 / `_EXIT_DEPS`=7);
