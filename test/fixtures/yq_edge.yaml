@@ -1,0 +1,29 @@
+global:
+  log_file: ~
+  connect_timeout: 20
+  ssh_extra: [a, b]
+  retry_initial: 7
+
+entries:
+  plain:
+    description: "a plain entry"
+    host: h1.example.com
+    local_port: 15001
+    remote_port: 5001
+  tabbed:
+    description: "tab	here"
+    host: h2.example.com
+    local_port: 15002
+    remote_port: 5002
+  nullish:
+    description: "null"
+    host: h3.example.com
+    local_port: 15003
+    remote_port: 5003
+  multiline:
+    description: |
+      line one
+      line two
+    host: h4.example.com
+    local_port: 15004
+    remote_port: 5004

@@ -586,7 +586,7 @@ _file_mode_octal() { #{{{
 # load a single config file (yq queries 0-4 of DESIGN 4.1)
 _config_parse_file() { #{{{
   local FILE=$1
-  local TAG NAME KEY VAL OPT LINE TABS RC
+  local TAG NAME KEY VAL OPT LINE SEPS RC LAST_NAME LAST_KEY
 
   # shellcheck disable=SC2119
   [[ -z "$_YQ_ERR_FILE" ]] && _YQ_ERR_FILE=$(__make_tmp)
@@ -602,7 +602,7 @@ _config_parse_file() { #{{{
   fi
 
   # 1. entry names (in order of appearance) and value types
-  while IFS=$'\t' read -r NAME TAG; do
+  while IFS=$_US read -r NAME TAG; do
     [[ -z "$NAME" ]] && continue
     if [[ -n "${_CFG_SOURCE[$NAME]}" ]]; then
       _config_purge_entry "$NAME"
@@ -613,40 +613,48 @@ _config_parse_file() { #{{{
     if ! _yq_is_map "$TAG"; then
       _config_invalidate "$NAME" "entry must be a map (got $(_yq_kind "$TAG"))"
     fi
-  done < <(yq -r '(.entries // {}) | to_entries | .[]
-                 | [.key, (.value | type)] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r "(.entries // {}) | to_entries | .[]
+                 | [.key, (.value | type)] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
   # 2. global (last one wins, per key)
-  while IFS=$'\t' read -r KEY VAL; do
+  while IFS=$_US read -r KEY VAL; do
     [[ -z "$KEY" ]] && continue
-    [[ "$VAL" == 'null' ]] && VAL=
     _GLOBAL[$KEY]=$VAL
-  done < <(yq -r '(.global // {}) | to_entries | .[]
-                 | [.key, .value] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r "(.global // {}) | to_entries | .[]
+                 | select((.value | type) != ([] | type) and (.value | type) != ({} | type))
+                 | [.key, .value] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
-  # 3. scalar values of an entry ($n is a variable inside the yq query, so keep the single quotes)
-  # shellcheck disable=SC2016
+  # 3. scalar values of an entry (the columns shift only on 0x1f / newline in a value)
+  LAST_NAME=
+  LAST_KEY=
   while IFS= read -r LINE; do
     [[ -z "$LINE" ]] && continue
-    TABS=${LINE//[^$'\t']/}
-    IFS=$'\t' read -r NAME KEY VAL <<<"$LINE"
-    if (( ${#TABS} != 2 )); then
-      # disable the entry when a value contains a tab and shifts the columns
-      _config_invalidate "$NAME" "value of '${KEY}' contains a tab character"
+    SEPS=${LINE//[^$_US]/}
+    if (( ${#SEPS} < 2 )); then
+      # a continuation line: the value of the previous key spans several lines
+      [[ -n "$LAST_NAME" ]] && _config_invalidate "$LAST_NAME" "value of '${LAST_KEY}' contains a newline"
+      continue
+    fi
+    IFS=$_US read -r NAME KEY VAL <<<"$LINE"
+    if (( ${#SEPS} > 2 )); then
+      # the value itself holds the delimiter, so the columns cannot be trusted
+      _config_invalidate "$NAME" "value of '${KEY}' contains a 0x1f character"
+      LAST_NAME=
+      LAST_KEY=
       continue
     fi
     [[ -z "$NAME" || -z "$KEY" ]] && continue
-    [[ "$VAL" == 'null' ]] && VAL=
     _CFG[${NAME}.${KEY}]=$VAL
-  done < <(yq -r '(.entries // {}) | to_entries | .[]
+    LAST_NAME=$NAME
+    LAST_KEY=$KEY
+  done < <(yq -r "(.entries // {}) | to_entries | .[]
                  | select((.value | type) == ({} | type))
-                 | .key as $n | .value | to_entries | .[]
+                 | .key as \$n | .value | to_entries | .[]
                  | select((.value | type) != ([] | type) and (.value | type) != ({} | type))
-                 | [$n, .key, .value] | @tsv' "$FILE" 2>/dev/null)
+                 | [\$n, .key, .value] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
-  # 4. ssh_options (an array; $n is a variable inside the yq query)
-  # shellcheck disable=SC2016
-  while IFS=$'\t' read -r NAME OPT; do
+  # 4. ssh_options (an array)
+  while IFS=$_US read -r NAME OPT; do
     [[ -z "$NAME" ]] && continue
     if [[ "$OPT" == *"$_US"* ]]; then
       _config_invalidate "$NAME" "ssh_options must not contain a 0x1f character"
@@ -657,11 +665,12 @@ _config_parse_file() { #{{{
     else
       _CFG_OPTS[$NAME]=$OPT
     fi
-  done < <(yq -r '(.entries // {}) | to_entries | .[]
+  done < <(yq -r "(.entries // {}) | to_entries | .[]
                  | select((.value | type) == ({} | type))
                  | select(((.value.ssh_options // []) | type) == ([] | type))
-                 | .key as $n | (.value.ssh_options // []) | .[]
-                 | [$n, .] | @tsv' "$FILE" 2>/dev/null)
+                 | select(((.value.ssh_options // []) | length) > 0)
+                 | .key as \$n | (.value.ssh_options // []) | .[]
+                 | [\$n, .] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
   return 0
 }

@@ -129,6 +129,66 @@ YAML
   [ -z "${_CFG_INVALID[with-key]}" ]
 }
 
+@test "config: yq_edge: null と \"null\" を区別する" {
+  load_config "${FIXTURES}/yq_edge.yaml"
+  # log_file: ~ は空として扱う
+  [ -z "${_GLOBAL[log_file]}" ]
+  # 文字列 "null" は空に化けない
+  [ "${_CFG[nullish.description]}" = 'null' ]
+}
+
+@test "config: yq_edge: タブを含む値でもエントリは有効なまま" {
+  load_config "${FIXTURES}/yq_edge.yaml"
+  [ -z "${_CFG_INVALID[tabbed]}" ]
+  [ "${_CFG[tabbed.description]}" = "tab\there" ]
+}
+
+@test "config: yq_edge: global に配列があっても後続のキーが読める" {
+  load_config "${FIXTURES}/yq_edge.yaml"
+  [ "${_GLOBAL[connect_timeout]}" = '20' ]
+  [ "${_GLOBAL[retry_initial]}" = '7' ]
+}
+
+@test "config: yq_edge: 複数行の値はエントリを無効にし、幽霊エントリを作らない" {
+  load_config "${FIXTURES}/yq_edge.yaml"
+  [[ "${_CFG_INVALID[multiline]}" == *"contains a newline"* ]]
+  # 継続行がエントリ名として登録されていないこと
+  [ "${#_CFG_NAMES[@]}" -eq 4 ]
+  local N
+  for N in "${_CFG_NAMES[@]}"; do
+    [[ "$N" != *' '* ]]
+  done
+  # _CFG_INVALID にも継続行由来のキーが無いこと
+  [ "${#_CFG_INVALID[@]}" -eq 1 ]
+}
+
+@test "config: 値に 0x1f を含むとエントリが無効になる" {
+  # YAML の二重引用符スカラーでは \uXXXX エスケープで制御文字を書ける
+  local F="${BATS_TEST_TMPDIR}/us.yaml"
+  cat >"$F" <<'YAML'
+entries:
+  us:
+    description: "a\u001Fb"
+    host: h
+    local_port: 15001
+    remote_port: 5001
+YAML
+  load_config "$F"
+  [[ "${_CFG_INVALID[us]}" == *"contains a 0x1f character"* ]]
+}
+
+@test "config: conf.d に空ファイルがあっても読み込みは成功する" {
+  local DIR="${BATS_TEST_TMPDIR}/emptyconf"
+  mkdir -p "${DIR}/conf.d"
+  cp "${FIXTURES}/basic.yaml" "${DIR}/config.yaml"
+  : >"${DIR}/conf.d/empty.yaml"
+  load_config "${DIR}/config.yaml"
+  [ "${#_CFG_NAMES[@]}" -eq 3 ]
+
+  run "$PFWD" --config "${DIR}/config.yaml" list
+  [ "$status" -eq 0 ]
+}
+
 @test "config: list が設定内容を表示する" {
   run "$PFWD" --config "${FIXTURES}/basic.yaml" list
   [ "$status" -eq 0 ]
