@@ -1,12 +1,12 @@
 # port-forwarder 内部設計書
 
-本書は [SPECS.md](../SPECS.md)（外部設計書）で定義された振る舞いを、**どのように実装するか**に絞って定義する。
-ユーザーから見た仕様（CLI・設定ファイル・出力・終了コード）は SPECS.md を正とし、本書では重複記載を最小限にする。
+本書は [SPECS_ja.md](SPECS_ja.md)（外部設計書）で定義された振る舞いを、**どのように実装するか**に絞って定義する。
+ユーザーから見た仕様（CLI・設定ファイル・出力・終了コード）は SPECS_ja.md を正とし、本書では重複記載を最小限にする。
 
 - 対象バージョン: v1.0（初版）
 - 作成日: 2026-09-08
 - 状態: 実装済み（2026-09-08）
-- 実装言語: bash（コーディング作法は [template.sh](../template.sh) に従う）
+- 実装言語: bash（コーディング作法は 2 章に定める）
 
 ---
 
@@ -16,7 +16,7 @@
 
 | 項目 | 決定 | 理由 |
 | --- | --- | --- |
-| 成果物構成 | `pfwd` **単一ファイル**にすべての機能を実装する | 配布が 1 ファイルのコピーで済む。template.sh の共通関数群をそのまま内包でき、作法との整合が最も高い |
+| 成果物構成 | `pfwd` **単一ファイル**にすべての機能を実装する | 配布が 1 ファイルのコピーで済む。共通関数群（`__` 始まり）も同一ファイルに内包し、外部ファイルへの依存を持たない |
 | bash バージョン | **bash 4.2 以上を必須**とする | 連想配列を設定・状態の保持に用いる。3.2 互換のために区切り文字付き配列で代替すると、設定マージと状態機械の実装が著しく複雑になる |
 | デーモン方式 | **単一プロセスによる集中管理ループ** | プロセス数が `デーモン 1 + ssh N` に収まり、SPECS 11 章のリソース要件を満たしやすい。停止処理も 1 箇所に閉じる |
 | CLI → デーモン制御 | **希望状態ファイル（desired）の書き換え + SIGUSR1** | 命令の取りこぼし・重複がなく、SPECS 11 章の冪等性要件（`start` / `stop` は状態に関わらず同じ結果に収束）と構造的に一致する |
@@ -24,9 +24,9 @@
 | デーモン未起動時の `start` | **エラー終了（終了コード 5）** し `pfwd up` を案内する | SPECS 7 章の終了コード 5 と整合。監視外のセッションを作らず、状態管理系統を 1 つに保つ |
 | テスト | **bats-core** による自動テスト | 設定パース・検証・状態遷移は副作用なしで検証できるため、関数分割の段階からテスト可能性を設計に織り込む |
 
-### 1.2 SPECS.md への反映が必要な差分
+### 1.2 SPECS_ja.md への反映が必要な差分
 
-実装方針の確定に伴い、SPECS.md 側に以下の修正・追記が必要となる。**本書では下記を確定仕様として扱う**。
+実装方針の確定に伴い、SPECS_ja.md 側に以下の修正・追記が必要となる。**本書では下記を確定仕様として扱う**。
 
 | # | SPECS 該当箇所 | 現行記述 | 本設計での扱い |
 | --- | --- | --- | --- |
@@ -41,16 +41,16 @@
 
 ## 2. コーディング規約
 
-[template.sh](../template.sh) を骨格として踏襲する。
+本章が本スクリプトのコーディング規約の唯一の正であり、外部のテンプレートやライブラリを参照しない。
 
-### 2.1 template.sh から継承する規約
+### 2.1 基本規約
 
 | 項目 | 規約 |
 | --- | --- |
-| ヘッダ | 先頭のコメントブロック（ファイル名・日付・Copyright）を踏襲する |
+| ヘッダ | 先頭に下記のコメントブロック（ファイル名・一行説明・開始日・Copyright）を置く |
 | 折り畳み | 関数・ブロックは `#{{{` … `#}}}` で囲む。末尾に `# vim: ts=2 sw=2 sts=2 et nu foldmethod=marker` を置く |
 | インデント | スペース 2、タブ不使用 |
-| 共通関数 | `__` で始まる（`__setup`、`__show_error`、`__error_end`、`__make_tmp` など）。template.sh のものは原則そのまま使う |
+| 共通関数 | `__` で始まる汎用基盤関数（下記一覧）。用途を限定し、スクリプト固有のロジックを持ち込まない |
 | 固有関数 | `_` で始まる（`_config_load`、`_cmd_status` など） |
 | グローバル変数 | `_` + 大文字スネークケース（`_CONFIG_FILE`、`_RUN_DIR`）。共通基盤由来は `__` + 大文字（`__SCRIPT_NAME`、`__SILENT`） |
 | ローカル変数 | 関数内で必ず `local` 宣言し、大文字スネークケース |
@@ -59,11 +59,35 @@
 | 一時ファイル | `__make_tmp` / `__get_tmp_base` を使い、終了時に `__script_end_clean_tmp` が掃除する |
 | 静的検査 | shellcheck を通す。抑止は必要最小限とし、必ず理由をコメントで添える |
 
+#### ヘッダ書式
+
+```bash
+#!/usr/bin/env bash
+#===============================================================================
+# <スクリプト名> : <一行説明>
+# Date    :  <YYYY-MM-DD> Start
+# Copyright: Original code by Yusuke Komori.
+#                       Copyright (c) <YYYY>. Yusuke Komori, All rights reserved.
+#===============================================================================
+```
+
+#### 共通基盤関数（`__` 始まり）
+
+| 関数 | 役割 |
+| --- | --- |
+| `__setup` | 起動直後の初期化。標準出力が TTY でなければ `__SILENT` を立てる |
+| `__setup_color` | `C_GREEN` / `C_YELLOW` / `C_RED` / `C_GREY` / `C_OFF` を ANSI SGR シーケンスで定義する（`tput` は使わない） |
+| `__show_info` / `__show_warn` / `__show_error` | ユーザー向けメッセージ出力。`__show_error` のみ stderr に出す |
+| `__error_end` | `__show_error` を出して終了する |
+| `__script_end` | `trap EXIT` から呼ばれ、`__script_end_*` という名前の関数をすべて名前順に実行する |
+| `__get_tmp_base` / `__make_tmp` | 一時ディレクトリ・一時ファイルの作成 |
+| `__script_end_clean_tmp` | 終了時に一時ディレクトリを削除する（`__script_end` から自動実行される） |
+
 ### 2.2 本スクリプトで追加する規約
 
 | 項目 | 規約 |
 | --- | --- |
-| `set -e` / `set -u` | **使わない**（template.sh に倣う）。異常系は関数の戻り値で表現し、呼び出し側で必ず判定する |
+| `set -e` / `set -u` | **使わない**。デーモンのループや死活監視は「失敗しうる処理を続行しながら状態に反映する」構造であり、途中終了されると状態機械が壊れるため。異常系は関数の戻り値で表現し、呼び出し側で必ず判定する |
 | 戻り値 | 「成功 = 0 / 失敗 = 1 以上」を守る。真偽を返す関数は `_is_*` / `_has_*` の名前にする |
 | 標準出力の用途 | 値を返す関数は結果のみを stdout に出す。ユーザー向けメッセージは `__show_*` / `_show_result`、ログは `_log` を通す（混在させない） |
 | 外部コマンド起動 | デーモンのループ内では極力避ける。bash 組み込み（`printf '%(%s)T'`、`/dev/tcp`、`[[ ]]`）を優先する |
@@ -71,9 +95,9 @@
 | ssh 引数 | 文字列連結ではなく**配列**（`_SSH_ARGS`）に積んで展開する。ホスト名・パスに空白が含まれても壊れないようにする |
 | エラーメッセージ | SPECS 10 章の方針（何が / なぜ / どうすれば）に従い、メッセージ定義は `_err_*` 関数に集約する |
 
-### 2.3 出力ヘルパの扱い
+### 2.3 結果表示ヘルパ
 
-template.sh の `__show_ok` は `[ OK ]`（4 文字幅）を出すが、SPECS 6.3 / 6.4 の表記は `[  OK  ]`（6 文字幅）である。**SPECS の出力仕様を優先**し、次のヘルパを新設する。`__show_ok` は使用しない。
+エントリ単位の成否表示は、SPECS 6.3 / 6.4 の `[  OK  ]`（6 文字幅）表記に合わせ、次のヘルパに一本化する。
 
 ```
 _show_result <RESULT> <NAME> <MESSAGE>
@@ -94,10 +118,10 @@ _show_result <RESULT> <NAME> <MESSAGE>
 `pfwd` 単一ファイルを、以下の順序のセクションで構成する。各セクションは `#{{{` … `#}}}` で折り畳む。
 
 ```
- 1. ヘッダコメント                       template.sh 準拠
+ 1. ヘッダコメント                       2.1 のヘッダ書式（ファイル名・日付・Copyright）
  2. common global variables              __SCRIPT_BASE / __SCRIPT_NAME / __SILENT
  3. global variables                     _VERSION / _CONFIG_FILE / _RUN_DIR / 連想配列群 / 終了コード定数
- 4. common functions                     template.sh 由来（__setup, __setup_color, __show_*, __make_tmp ...）
+ 4. common functions                     __ 始まりの共通基盤関数（__setup, __setup_color, __show_*, __make_tmp ...）
  5. utility functions                    _now / _epoch_to_hms / _expand_tilde / _in_array
  6. logging functions                    _log_init / _log / _debug
  7. config functions                     _config_find / _config_load / _config_validate ...
@@ -123,9 +147,12 @@ _show_result <RESULT> <NAME> <MESSAGE>
 | ファイル | 内容 |
 | --- | --- |
 | `pfwd` | 本体（実行可能） |
-| `SPECS.md` / `docs/DESIGN.md` | 外部設計 / 内部設計 |
-| `test/*.bats` | bats テスト |
+| `README_ja.md` / `README.md` | 利用者向け README（日本語版が正、英語版は翻訳） |
+| `docs/SPECS_ja.md` / `docs/SPECS.md` | 外部設計（日本語版が正、英語版は翻訳） |
+| `docs/DESIGN_ja.md` | 内部設計（本書。英語版は未作成） |
+| `test/*.bats` / `test/helper.bash` | bats テスト |
 | `test/fixtures/*.yaml` | テスト用設定ファイル |
+| `aqua.yaml` | テストツールチェーンの定義（aqua） |
 
 `__SCRIPT_NAME` は usage・メッセージの表示にのみ使う。
 
@@ -652,7 +679,7 @@ CLI は desired を書いて SIGUSR1 を送った後、state ファイルをポ�
 
 #### 引数解析
 
-template.sh の「値なしロングオプションを一括処理する」方式は `--config <PATH>` のような値付きオプションを扱えないため、**統合パーサ `_parse_args`** を実装する。template.sh の `__LONG_OPT_NAMES` 方式は採用せず、その旨をコメントで明記する。
+値なしロングオプションを一括で `--foo` → `_FOO=yes` に変換する簡易方式では `--config <PATH>` のような値付きオプションを扱えないため、**統合パーサ `_parse_args`** を実装する。簡易方式を採らない理由はソースコメントにも明記する。
 
 ```
 _parse_args "$@":
@@ -933,7 +960,7 @@ CI での実行を前提に、shellcheck の指摘は 0 件を維持する（抑
 
 | # | 内容 | 完了条件 |
 | --- | --- | --- |
-| 1 | 骨格（template.sh のコピー、セクション枠、引数解析、`version` / `help`） | `pfwd version` / `pfwd --help` が動く |
+| 1 | 骨格（ヘッダ・セクション枠・共通基盤関数の実装、引数解析、`version` / `help`） | `pfwd version` / `pfwd --help` が動く |
 | 2 | 設定の読み込み・マージ・検証 + `list` / `config --init` | `test_config` / `test_validate` が通る |
 | 3 | 状態管理とログ | `test_state` が通る |
 | 4 | SSH セッション制御とプローブ | `test_probe` が通る。手動で `_ssh_start` / `_ssh_stop` が動く |
@@ -941,7 +968,7 @@ CI での実行を前提に、shellcheck の指摘は 0 件を維持する（抑
 | 6 | CLI（`up` / `down` / `start` / `stop` / `restart` / `reload` / `status` / `logs`） | `test_cli` が通る。SPECS 6 章の出力と一致する |
 | 7 | `test` サブコマンド | SPECS 6.4 の出力と一致する |
 | 8 | `install-service` / `uninstall-service` | Linux で systemd 経由の起動・停止・reload が動く |
-| 9 | 結合テストと文書整備 | `test_integration` が通る。SPECS.md に 1.2 節の差分を反映する |
+| 9 | 結合テストと文書整備 | `test_integration` が通る。SPECS_ja.md に 1.2 節の差分を反映する |
 
 ---
 
@@ -953,7 +980,7 @@ CI での実行を前提に、shellcheck の指摘は 0 件を維持する（抑
 | `nc` フォールバック時の `remote` | `tcp` 相当に劣化（起動時に WARN） | `/dev/tcp` が無効な bash は稀のため v1.0 では許容する |
 | ロック方式 | `mkdir` による原子性 | `flock` が両 OS で使えるようになれば置き換えを検討 |
 | macOS のスリープ復帰 | 対応しない（SPECS 12 章） | `ServerAliveInterval` による断検知に委ねる |
-| SPECS.md の更新 | 1.2 節の 6 項目 | 反映済み（2026-09-08） |
+| SPECS_ja.md の更新 | 1.2 節の 6 項目 | 反映済み（2026-09-08） |
 
 ---
 

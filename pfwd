@@ -209,7 +209,7 @@ __get_tmp_base() { #{{{
 }
 #}}}
 
-# shellcheck disable=SC2120  # the -d argument is optional (comes from template.sh)
+# shellcheck disable=SC2120  # the -d argument is optional; no caller passes it today
 __make_tmp() { #{{{
   local TMP_BASE
   TMP_BASE=`__get_tmp_base`
@@ -2729,8 +2729,8 @@ _cmd_help() { #{{{
 #-------------------------------------------------------------------------------
 #- argument parsing ------------------------------------------------------------
 #{{{
-# the __LONG_OPT_NAMES scheme of template.sh cannot handle options that take a value,
-# such as --config <PATH>, so an integrated parser is implemented here (DESIGN 5.9).
+# a simple scheme that only maps a valueless --foo to _FOO=yes cannot handle options
+# that take a value, such as --config <PATH>, so an integrated parser is used (DESIGN 5.9).
 _parse_args() { #{{{
   while (( $# > 0 )); do
     case "$1" in
