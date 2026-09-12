@@ -131,6 +131,7 @@ YAML
 
 @test "config: yq_edge: null と \"null\" を区別する" {
   load_config "${FIXTURES}/yq_edge.yaml"
+  set -e
   # log_file: ~ は空として扱う
   [ -z "${_GLOBAL[log_file]}" ]
   # 文字列 "null" は空に化けない
@@ -139,18 +140,21 @@ YAML
 
 @test "config: yq_edge: タブを含む値でもエントリは有効なまま" {
   load_config "${FIXTURES}/yq_edge.yaml"
+  set -e
   [ -z "${_CFG_INVALID[tabbed]}" ]
-  [ "${_CFG[tabbed.description]}" = "tab\there" ]
+  [ "${_CFG[tabbed.description]}" = $'tab\there' ]
 }
 
 @test "config: yq_edge: global に配列があっても後続のキーが読める" {
   load_config "${FIXTURES}/yq_edge.yaml"
+  set -e
   [ "${_GLOBAL[connect_timeout]}" = '20' ]
   [ "${_GLOBAL[retry_initial]}" = '7' ]
 }
 
 @test "config: yq_edge: 複数行の値はエントリを無効にし、幽霊エントリを作らない" {
   load_config "${FIXTURES}/yq_edge.yaml"
+  set -e
   [[ "${_CFG_INVALID[multiline]}" == *"contains a newline"* ]]
   # 継続行がエントリ名として登録されていないこと
   [ "${#_CFG_NAMES[@]}" -eq 4 ]
@@ -174,6 +178,7 @@ entries:
     remote_port: 5001
 YAML
   load_config "$F"
+  set -e
   [[ "${_CFG_INVALID[us]}" == *"contains a 0x1f character"* ]]
 }
 
@@ -183,6 +188,7 @@ YAML
   cp "${FIXTURES}/basic.yaml" "${DIR}/config.yaml"
   : >"${DIR}/conf.d/empty.yaml"
   load_config "${DIR}/config.yaml"
+  set -e
   [ "${#_CFG_NAMES[@]}" -eq 3 ]
 
   run "$PFWD" --config "${DIR}/config.yaml" list
