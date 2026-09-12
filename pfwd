@@ -460,6 +460,26 @@ _YQ_ERR_FILE=
 # suppress validation warnings (the test subcommand prints them itself)
 _NO_CFG_WARN=
 
+# normalize the output of the yq 'type' operator (DESIGN 4.1)
+# mikefarah/yq returns YAML tags (!!map ...), kislyuk/yq returns jq type names (object ...)
+_yq_kind() { #{{{
+  case "$1" in
+    '!!map'|object)           printf 'map\n'    ;;
+    '!!seq'|array)            printf 'seq\n'    ;;
+    '!!null'|null|'')         printf 'null\n'   ;;
+    '!!bool'|boolean)         printf 'bool\n'   ;;
+    '!!int'|'!!float'|number) printf 'number\n' ;;
+    '!!str'|string)           printf 'str\n'    ;;
+    *)                        printf '%s\n' "$1" ;;
+  esac
+}
+#}}}
+
+# type predicates used inside the parse loops (no subshell / DESIGN 2.2)
+_yq_is_map()  { [[ "$1" == '!!map' || "$1" == 'object' ]]; } #{{{
+_yq_is_null() { [[ -z "$1" || "$1" == '!!null' || "$1" == 'null' ]]; }
+#}}}
+
 # default path of the user config file (SPECS 4.1)
 _config_user_path() { #{{{
   if [[ -n "$XDG_CONFIG_HOME" ]]; then
@@ -572,13 +592,13 @@ _config_parse_file() { #{{{
   [[ -z "$_YQ_ERR_FILE" ]] && _YQ_ERR_FILE=$(__make_tmp)
 
   # 0. structure validation
-  TAG=$(yq -r '.entries | tag' "$FILE" 2>"$_YQ_ERR_FILE")
+  TAG=$(yq -r '.entries | type' "$FILE" 2>"$_YQ_ERR_FILE")
   RC=$?
   if (( RC != 0 )); then
     _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "$(_sanitize "$(cat "$_YQ_ERR_FILE")")")"
   fi
-  if [[ "$TAG" != '!!map' && "$TAG" != '!!null' ]]; then
-    _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "'entries' must be a map (got ${TAG})")"
+  if ! _yq_is_map "$TAG" && ! _yq_is_null "$TAG"; then
+    _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "'entries' must be a map (got $(_yq_kind "$TAG"))")"
   fi
 
   # 1. entry names (in order of appearance) and value types
@@ -590,17 +610,19 @@ _config_parse_file() { #{{{
       _CFG_NAMES+=("$NAME")
     fi
     _CFG_SOURCE[$NAME]=$FILE
-    if [[ "$TAG" != '!!map' ]]; then
-      _config_invalidate "$NAME" "entry must be a map (got ${TAG})"
+    if ! _yq_is_map "$TAG"; then
+      _config_invalidate "$NAME" "entry must be a map (got $(_yq_kind "$TAG"))"
     fi
-  done < <(yq -r '.entries // {} | to_entries[] | [.key, (.value | tag)] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r '(.entries // {}) | to_entries | .[]
+                 | [.key, (.value | type)] | @tsv' "$FILE" 2>/dev/null)
 
   # 2. global (last one wins, per key)
   while IFS=$'\t' read -r KEY VAL; do
     [[ -z "$KEY" ]] && continue
     [[ "$VAL" == 'null' ]] && VAL=
     _GLOBAL[$KEY]=$VAL
-  done < <(yq -r '.global // {} | to_entries[] | [.key, .value] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r '(.global // {}) | to_entries | .[]
+                 | [.key, .value] | @tsv' "$FILE" 2>/dev/null)
 
   # 3. scalar values of an entry ($n is a variable inside the yq query, so keep the single quotes)
   # shellcheck disable=SC2016
@@ -616,10 +638,10 @@ _config_parse_file() { #{{{
     [[ -z "$NAME" || -z "$KEY" ]] && continue
     [[ "$VAL" == 'null' ]] && VAL=
     _CFG[${NAME}.${KEY}]=$VAL
-  done < <(yq -r '.entries // {} | to_entries[]
-                 | select((.value | tag) == "!!map")
-                 | .key as $n | .value | to_entries[]
-                 | select((.value | tag) != "!!seq" and (.value | tag) != "!!map")
+  done < <(yq -r '(.entries // {}) | to_entries | .[]
+                 | select((.value | type) == ({} | type))
+                 | .key as $n | .value | to_entries | .[]
+                 | select((.value | type) != ([] | type) and (.value | type) != ({} | type))
                  | [$n, .key, .value] | @tsv' "$FILE" 2>/dev/null)
 
   # 4. ssh_options (an array; $n is a variable inside the yq query)
@@ -635,10 +657,11 @@ _config_parse_file() { #{{{
     else
       _CFG_OPTS[$NAME]=$OPT
     fi
-  done < <(yq -r '.entries // {} | to_entries[]
-                 | select((.value | tag) == "!!map")
-                 | select((.value.ssh_options // [] | tag) == "!!seq")
-                 | .key as $n | (.value.ssh_options // []) | .[] | [$n, .] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r '(.entries // {}) | to_entries | .[]
+                 | select((.value | type) == ({} | type))
+                 | select(((.value.ssh_options // []) | type) == ([] | type))
+                 | .key as $n | (.value.ssh_options // []) | .[]
+                 | [$n, .] | @tsv' "$FILE" 2>/dev/null)
 
   return 0
 }
