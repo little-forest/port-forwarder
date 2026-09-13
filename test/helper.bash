@@ -39,11 +39,23 @@ setup_pfwd() {
   _QUIET=
   _NO_TTY=yes
   __SILENT=yes
+  # pfwd は $0 と $$ から __TMP_BASE を決めるため、source した bats の
+  # テストプロセスでは /dev/shm や Ramdisk に tmp.bats-exec-test.<pid> を作る。
+  # helper が trap EXIT を外している以上 __script_end_clean_tmp は走らないので、
+  # bats が後始末するテスト用一時ディレクトリ配下へ寄せる
+  __TMP_BASE="${BATS_TEST_TMPDIR}/tmp.pfwd"
+  # _ctl_path が ControlPath を退避させる先 (${TMPDIR}/pfwd-<uid>) も
+  # 実 TMPDIR に残り続けるため、同じくテスト用一時ディレクトリへ向ける
+  export TMPDIR="$BATS_TEST_TMPDIR"
 }
 
 # 一時的な実行時ディレクトリを用意する
 setup_run_dir() {
-  _RUN_DIR=$(mktemp -d "${BATS_TEST_TMPDIR:-${TMPDIR:-/tmp}}/pfwd-run.XXXXXX")
+  # ControlPath の上限は 100 バイト (_CTL_PATH_MAX)。macOS の BATS_TEST_TMPDIR は
+  # /var/folders/... 配下で 70 文字を超えるため、ここで長い名前を付けると
+  # ${_RUN_DIR}/ctl/<name>.sock が上限を超え、_ctl_path が TMPDIR 退避に倒れる。
+  # 退避経路を検証するテスト以外では起こしたくないので名前を詰めておく
+  _RUN_DIR=$(mktemp -d "${BATS_TEST_TMPDIR:-${TMPDIR:-/tmp}}/r.XXXX")
   mkdir -p "${_RUN_DIR}/state" "${_RUN_DIR}/ctl" "${_RUN_DIR}/err"
 }
 
