@@ -13,3 +13,5 @@ registries:
 packages:
 - name: bats-core/bats-core@v1.14.0
 - name: go-task/task@v3.52.0
+- name: koalaman/shellcheck@v0.11.0
+- name: mikefarah/yq@v4.53.6
