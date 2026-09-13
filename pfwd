@@ -20,6 +20,20 @@ fi
 __SCRIPT_BASE=$(cd "$(dirname "$0")" || exit; pwd)
 __SCRIPT_NAME=$(basename "$0")
 
+# Temporary directory for this process. The path is fixed here, at script scope,
+# so that both __make_tmp (which may run inside a command substitution) and
+# __script_end_clean_tmp (which runs from the EXIT trap) agree on it.
+# The directory itself is created lazily by __make_tmp.
+# Plain -d tests instead of uname: this is evaluated on every run, including the
+# ones that never need a temporary file.
+if [[ -d /dev/shm ]]; then
+  __TMP_BASE="/dev/shm/tmp.${__SCRIPT_NAME}.$$"
+elif [[ -d /Volumes/Ramdisk ]]; then
+  __TMP_BASE="/Volumes/Ramdisk/tmp.${__SCRIPT_NAME}.$$"
+else
+  __TMP_BASE="${TMPDIR:-/tmp}/tmp.${__SCRIPT_NAME}.$$"
+fi
+
 __SILENT=
 
 #-------------------------------------------------------------------------------
@@ -192,37 +206,27 @@ __error_end() { #{{{
 }
 #}}}
 
+# accessor kept for compatibility with the shared boilerplate; the path itself
+# is fixed at script scope in __TMP_BASE
 __get_tmp_base() { #{{{
-  local TMP_BASE RAMDISK
-  if [[ `uname` != Darwin ]]; then
-    RAMDISK='/dev/shm'
-  else
-    RAMDISK='/Volumes/Ramdisk'
-  fi
-  [[ -d ${RAMDISK} ]] && TMP_BASE=${RAMDISK}/ || TMP_BASE=${TMPDIR:-/tmp}/
-  TMP_BASE="${TMP_BASE}tmp.`basename "$0"`.$$"
-  [[ ! -d "$TMP_BASE" ]] && mkdir "$TMP_BASE"
-  echo "$TMP_BASE"
+  echo "$__TMP_BASE"
 }
 #}}}
 
 # shellcheck disable=SC2120  # the -d argument is optional; no caller passes it today
 __make_tmp() { #{{{
-  local TMP_BASE
-  TMP_BASE=`__get_tmp_base`
+  # create the base directory lazily, so that runs which never need a temporary
+  # file leave nothing behind. -m 700 does not rely on umask being set yet
+  [[ -d "$__TMP_BASE" ]] || mkdir -m 700 "$__TMP_BASE" || return 1
   local OPT=()
   [[ "$1" == '-d' ]] && OPT+=("$1")
-  OPT+=('-p' "$TMP_BASE")
+  OPT+=('-p' "$__TMP_BASE")
   mktemp "${OPT[@]}"
 }
 #}}}
 
 __script_end_clean_tmp() { #{{{
-  local TMP_BASE
-  TMP_BASE="${TMPDIR:-/tmp}/tmp.`basename "$0"`.$$"
-  [[ -d /dev/shm ]] && TMP_BASE="/dev/shm/tmp.`basename "$0"`.$$"
-  [[ -d /Volumes/Ramdisk ]] && TMP_BASE="/Volumes/Ramdisk/tmp.`basename "$0"`.$$"
-  [[ -d "$TMP_BASE" ]] && rm -rf "${TMP_BASE}"
+  [[ -d "$__TMP_BASE" ]] && rm -rf "$__TMP_BASE"
   return 0
 }
 #}}}
