@@ -119,3 +119,9 @@ while True:
   kill "$PID" 2>/dev/null
   return 1
 }
+
+# ファイルのパーミッションを 3 桁で返す (GNU / BSD 両対応)。
+# GNU stat の -f は --file-system なので必ず -c を先に試す
+perm_of() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
