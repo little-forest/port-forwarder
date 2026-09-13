@@ -445,6 +445,7 @@ _err_no_daemon()       { echo "daemon is not running. Run '${__SCRIPT_NAME} up' 
 _err_no_entry()        { echo "no such entry '$1'"; }
 _err_config_is_dir()   { echo "$1 is a directory. Specify the config file itself (e.g. $1/config.yaml)"; }
 _err_config_no_args()  { echo "'config' takes no arguments. Use '${__SCRIPT_NAME} --config <PATH> config --init' to choose where the file is created."; }
+_err_unsupported_yq()  { echo "unsupported yq implementation: $1. pfwd supports mikefarah/yq 4.31+ (https://github.com/mikefarah/yq) and kislyuk/yq 2.14+ with jq (https://github.com/kislyuk/yq)."; }
 #}}}
 
 #-------------------------------------------------------------------------------
@@ -457,8 +458,74 @@ _KNOWN_GLOBAL_KEYS=(check_interval connect_timeout retry_initial retry_max retry
                     server_alive_interval server_alive_count_max log_file)
 # file that receives yq's stderr (created lazily)
 _YQ_ERR_FILE=
+# yq implementation: 'go' (mikefarah/yq), 'python' (kislyuk/yq) or 'unknown'; empty until detected
+_YQ_IMPL=
+# human readable version, shown by the test subcommand
+_YQ_VERSION=
 # suppress validation warnings (the test subcommand prints them itself)
 _NO_CFG_WARN=
+
+# normalize the output of the yq 'type' operator (DESIGN 4.1)
+# mikefarah/yq returns YAML tags (!!map ...), kislyuk/yq returns jq type names (object ...)
+_yq_kind() { #{{{
+  case "$1" in
+    '!!map'|object)           printf 'map\n'    ;;
+    '!!seq'|array)            printf 'seq\n'    ;;
+    '!!null'|null|'')         printf 'null\n'   ;;
+    '!!bool'|boolean)         printf 'bool\n'   ;;
+    '!!int'|'!!float'|number) printf 'number\n' ;;
+    '!!str'|string)           printf 'str\n'    ;;
+    *)                        printf '%s\n' "$1" ;;
+  esac
+}
+#}}}
+
+# type predicates used inside the parse loops (no subshell / DESIGN 2.2)
+_yq_is_map()  { [[ "$1" == '!!map' || "$1" == 'object' ]]; } #{{{
+_yq_is_null() { [[ -z "$1" || "$1" == '!!null' || "$1" == 'null' ]]; }
+#}}}
+
+# identify the yq implementation (idempotent; never exits / DESIGN 7.2)
+# only called when a query failed, or by the test subcommand
+_yq_detect() { #{{{
+  [[ -n "$_YQ_IMPL" ]] && return 0
+  local OUT FIRST SECOND
+  # the exit code is not checked: kislyuk/yq reports its version even without jq
+  OUT=$(yq --version 2>&1)
+  FIRST=${OUT%%$'\n'*}
+  SECOND=${OUT#*$'\n'}
+  [[ "$SECOND" == "$FIRST" ]] && SECOND=
+  if [[ "$OUT" == *mikefarah* ]]; then
+    _YQ_IMPL=go
+    _YQ_VERSION="mikefarah/yq ${FIRST##* }"
+  elif [[ "$FIRST" =~ ^yq[[:space:]]+[0-9] ]]; then
+    _YQ_IMPL=python
+    _YQ_VERSION="kislyuk/yq ${FIRST##* }"
+    [[ -n "$SECOND" ]] && _YQ_VERSION="${_YQ_VERSION} ($(_sanitize "$SECOND"))"
+  else
+    _YQ_IMPL=unknown
+    _YQ_VERSION=$(_sanitize "$FIRST")
+  fi
+  return 0
+}
+#}}}
+
+# explain why a yq query failed, when the reason is the yq implementation itself
+# returns 0 when yq looks usable, so the caller can report the parse error instead
+_yq_diagnose() { #{{{
+  _yq_detect
+  case "$_YQ_IMPL" in
+    python)
+      command -v jq >/dev/null 2>&1 \
+        || _error_exit "$_EXIT_DEPS" "$(_err_no_command jq)"
+      ;;
+    unknown)
+      _error_exit "$_EXIT_DEPS" "$(_err_unsupported_yq "$_YQ_VERSION")"
+      ;;
+  esac
+  return 0
+}
+#}}}
 
 # default path of the user config file (SPECS 4.1)
 _config_user_path() { #{{{
@@ -566,23 +633,25 @@ _file_mode_octal() { #{{{
 # load a single config file (yq queries 0-4 of DESIGN 4.1)
 _config_parse_file() { #{{{
   local FILE=$1
-  local TAG NAME KEY VAL OPT LINE TABS RC
+  local TAG NAME KEY VAL OPT LINE SEPS RC LAST_NAME LAST_KEY
 
   # shellcheck disable=SC2119
   [[ -z "$_YQ_ERR_FILE" ]] && _YQ_ERR_FILE=$(__make_tmp)
 
   # 0. structure validation
-  TAG=$(yq -r '.entries | tag' "$FILE" 2>"$_YQ_ERR_FILE")
+  TAG=$(yq -r '.entries | type' "$FILE" 2>"$_YQ_ERR_FILE")
   RC=$?
   if (( RC != 0 )); then
+    # exits when yq itself is the problem (unknown implementation / missing jq)
+    _yq_diagnose
     _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "$(_sanitize "$(cat "$_YQ_ERR_FILE")")")"
   fi
-  if [[ "$TAG" != '!!map' && "$TAG" != '!!null' ]]; then
-    _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "'entries' must be a map (got ${TAG})")"
+  if ! _yq_is_map "$TAG" && ! _yq_is_null "$TAG"; then
+    _error_exit "$_EXIT_CONFIG" "$(_err_parse_failed "$FILE" "'entries' must be a map (got $(_yq_kind "$TAG"))")"
   fi
 
   # 1. entry names (in order of appearance) and value types
-  while IFS=$'\t' read -r NAME TAG; do
+  while IFS=$_US read -r NAME TAG; do
     [[ -z "$NAME" ]] && continue
     if [[ -n "${_CFG_SOURCE[$NAME]}" ]]; then
       _config_purge_entry "$NAME"
@@ -590,41 +659,51 @@ _config_parse_file() { #{{{
       _CFG_NAMES+=("$NAME")
     fi
     _CFG_SOURCE[$NAME]=$FILE
-    if [[ "$TAG" != '!!map' ]]; then
-      _config_invalidate "$NAME" "entry must be a map (got ${TAG})"
+    if ! _yq_is_map "$TAG"; then
+      _config_invalidate "$NAME" "entry must be a map (got $(_yq_kind "$TAG"))"
     fi
-  done < <(yq -r '.entries // {} | to_entries[] | [.key, (.value | tag)] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r "(.entries // {}) | to_entries | .[]
+                 | [.key, (.value | type)] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
   # 2. global (last one wins, per key)
-  while IFS=$'\t' read -r KEY VAL; do
+  while IFS=$_US read -r KEY VAL; do
     [[ -z "$KEY" ]] && continue
-    [[ "$VAL" == 'null' ]] && VAL=
     _GLOBAL[$KEY]=$VAL
-  done < <(yq -r '.global // {} | to_entries[] | [.key, .value] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r "(.global // {}) | to_entries | .[]
+                 | select((.value | type) != ([] | type) and (.value | type) != ({} | type))
+                 | [.key, .value] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
-  # 3. scalar values of an entry ($n is a variable inside the yq query, so keep the single quotes)
-  # shellcheck disable=SC2016
+  # 3. scalar values of an entry (the columns shift only on 0x1f / newline in a value)
+  LAST_NAME=
+  LAST_KEY=
   while IFS= read -r LINE; do
     [[ -z "$LINE" ]] && continue
-    TABS=${LINE//[^$'\t']/}
-    IFS=$'\t' read -r NAME KEY VAL <<<"$LINE"
-    if (( ${#TABS} != 2 )); then
-      # disable the entry when a value contains a tab and shifts the columns
-      _config_invalidate "$NAME" "value of '${KEY}' contains a tab character"
+    SEPS=${LINE//[^$_US]/}
+    if (( ${#SEPS} < 2 )); then
+      # a continuation line: the value of the previous key spans several lines
+      [[ -n "$LAST_NAME" ]] && _config_invalidate "$LAST_NAME" "value of '${LAST_KEY}' contains a newline"
+      continue
+    fi
+    IFS=$_US read -r NAME KEY VAL <<<"$LINE"
+    if (( ${#SEPS} > 2 )); then
+      # the value itself holds the delimiter, so the columns cannot be trusted
+      _config_invalidate "$NAME" "value of '${KEY}' contains a 0x1f character"
+      LAST_NAME=
+      LAST_KEY=
       continue
     fi
     [[ -z "$NAME" || -z "$KEY" ]] && continue
-    [[ "$VAL" == 'null' ]] && VAL=
     _CFG[${NAME}.${KEY}]=$VAL
-  done < <(yq -r '.entries // {} | to_entries[]
-                 | select((.value | tag) == "!!map")
-                 | .key as $n | .value | to_entries[]
-                 | select((.value | tag) != "!!seq" and (.value | tag) != "!!map")
-                 | [$n, .key, .value] | @tsv' "$FILE" 2>/dev/null)
+    LAST_NAME=$NAME
+    LAST_KEY=$KEY
+  done < <(yq -r "(.entries // {}) | to_entries | .[]
+                 | select((.value | type) == ({} | type))
+                 | .key as \$n | .value | to_entries | .[]
+                 | select((.value | type) != ([] | type) and (.value | type) != ({} | type))
+                 | [\$n, .key, .value] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
-  # 4. ssh_options (an array; $n is a variable inside the yq query)
-  # shellcheck disable=SC2016
-  while IFS=$'\t' read -r NAME OPT; do
+  # 4. ssh_options (an array)
+  while IFS=$_US read -r NAME OPT; do
     [[ -z "$NAME" ]] && continue
     if [[ "$OPT" == *"$_US"* ]]; then
       _config_invalidate "$NAME" "ssh_options must not contain a 0x1f character"
@@ -635,10 +714,12 @@ _config_parse_file() { #{{{
     else
       _CFG_OPTS[$NAME]=$OPT
     fi
-  done < <(yq -r '.entries // {} | to_entries[]
-                 | select((.value | tag) == "!!map")
-                 | select((.value.ssh_options // [] | tag) == "!!seq")
-                 | .key as $n | (.value.ssh_options // []) | .[] | [$n, .] | @tsv' "$FILE" 2>/dev/null)
+  done < <(yq -r "(.entries // {}) | to_entries | .[]
+                 | select((.value | type) == ({} | type))
+                 | select(((.value.ssh_options // []) | type) == ([] | type))
+                 | select(((.value.ssh_options // []) | length) > 0)
+                 | .key as \$n | (.value.ssh_options // []) | .[]
+                 | [\$n, .] | join(\"${_US}\")" "$FILE" 2>/dev/null)
 
   return 0
 }
@@ -2567,6 +2648,8 @@ _cmd_test() { #{{{
   for F in "${_CONFIG_FILES[@]:1}"; do
     printf '        %s\n' "$F"
   done
+  _yq_detect
+  printf 'yq:     %s\n' "$_YQ_VERSION"
   printf '\n'
   _resolve_names
   _calc_name_width "${_TARGETS[@]}"

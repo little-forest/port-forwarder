@@ -24,7 +24,8 @@ metrics     retrying    127.0.0.1:19090  prom.internal:9090           -         
 | --- | --- | --- | --- |
 | `bash` | 4.2 or later | ✔ | The bash 3.2 shipped with macOS does not work (`brew install bash`). Exits with code 7 when unsatisfied |
 | `ssh` | OpenSSH 7.4 or later | ✔ | Standard on both OSes |
-| `yq` | mikefarah/yq v4 | ✔ | The Go implementation; the same-named Python tool will not work |
+| `yq` | mikefarah/yq 4.31+ **or** kislyuk/yq 2.14+ | ✔ | Either the Go or the Python implementation works |
+| `jq` | 1.5 or later | | Required only when `yq` is kislyuk/yq (the Python implementation) |
 | `nc` | - | | Optional. Falls back to bash `/dev/tcp` when absent |
 
 Supported platforms are RedHat-family Linux (RHEL / Rocky / AlmaLinux / Fedora) and macOS.
@@ -321,7 +322,9 @@ When `log_file` is unset, logs go to stdout. Under systemd journald collects the
 | Symptom / message | What to do |
 | --- | --- |
 | `bash 4.2 or later is required` | You are running the bash 3.2 shipped with macOS. Run `brew install bash` |
-| `required command 'yq' not found` | Install mikefarah/yq v4 and put it on your `PATH` |
+| `required command 'yq' not found` | Install mikefarah/yq 4.31+ or kislyuk/yq 2.14+ and put it on your `PATH` |
+| `required command 'jq' not found` | kislyuk/yq (the Python implementation) wraps jq, so install jq as well |
+| `unsupported yq implementation: ...` | The `yq` on your `PATH` is neither mikefarah/yq nor kislyuk/yq (e.g. the `yq read` syntax of v3). Replace it with one of the supported ones; the `yq:` line of `pfwd test` shows what was recognized |
 | `host key for ... is not in known_hosts` | Register it: `ssh-keyscan -H <host> >> ~/.ssh/known_hosts` |
 | `identity file ... has too open permissions` | Run `chmod 600 <key file>` |
 | `local port ... is already in use by another process` | Another process holds the port. Change `local_port` or stop that process. Such an entry is not retried and goes straight to `failed` |
