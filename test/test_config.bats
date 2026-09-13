@@ -268,3 +268,68 @@ YAML
   [[ "$output" == *"Created: ${XDG}/port-forwarder/config.yaml"* ]]
   [[ "$output" != *'Note:'* ]]
 }
+
+# --- config --init --system ---------------------------------------------------
+
+@test "config: _config_init_target が --system でシステム設定パスを返す" {
+  [ "$(uname)" = 'Linux' ] || skip 'Linux 以外では --system がエラーになる'
+  local TARGET
+  TARGET=$(_config_init_target yes)
+  [ "$TARGET" = "$_SYSTEM_CONFIG" ]
+}
+
+@test "config: _config_init_target は -c を --system より優先し、警告を出す" {
+  # 警告は setup_pfwd の __SILENT=yes で抑制されるため、ここだけ解除する
+  __SILENT=
+  _OPT_CONFIG="${BATS_TEST_TMPDIR}/mine.yaml"
+  # run は既定で stderr を output に混ぜるため、警告の検証は分離して行う
+  run --separate-stderr _config_init_target yes
+  [ "$status" -eq 0 ]
+  [ "$stdout" = "${BATS_TEST_TMPDIR}/mine.yaml" ]
+  [[ "$stderr" == *'--system is ignored because --config was given'* ]]
+}
+
+@test "config: _config_init_target は --system 無しなら従来どおり利用者パスを返す" {
+  local XDG="${BATS_TEST_TMPDIR}/tgt-xdg"
+  local TARGET
+  TARGET=$(XDG_CONFIG_HOME="$XDG" _config_init_target '')
+  [ "$TARGET" = "${XDG}/port-forwarder/config.yaml" ]
+}
+
+@test "config: システム設定パスに作成すると Note 行は出ない" {
+  # _SYSTEM_CONFIG を一時ディレクトリへ差し替え、root なしで検証する
+  local SAVED=$_SYSTEM_CONFIG
+  _SYSTEM_CONFIG="${BATS_TEST_TMPDIR}/etc/port-forwarder/config.yaml"
+  run _config_init "$_SYSTEM_CONFIG" ''
+  _SYSTEM_CONFIG=$SAVED
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Created: ${BATS_TEST_TMPDIR}/etc/port-forwarder/config.yaml"* ]]
+  [[ "$output" != *'Note:'* ]]
+}
+
+@test "config: 書き込めないパスでは Created を出さずエラー終了する" {
+  [ "$EUID" -ne 0 ] || skip 'root では書き込み権限チェックが効かない'
+  local DIR="${BATS_TEST_TMPDIR}/ro"
+  mkdir -p "$DIR"
+  chmod 500 "$DIR"
+  run "$PFWD" --config "${DIR}/config.yaml" config --init
+  chmod 700 "$DIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'cannot write the config file'* ]]
+  [[ "$output" != *'Created:'* ]]
+  # bash 自身のリダイレクトエラーが漏れていないこと
+  [[ "$output" != *'Permission denied'* ]]
+  [ ! -e "${DIR}/config.yaml" ]
+}
+
+@test "config: ディレクトリを作れないパスでは mkdir のエラーで終了する" {
+  [ "$EUID" -ne 0 ] || skip 'root では書き込み権限チェックが効かない'
+  local DIR="${BATS_TEST_TMPDIR}/ro-mkdir"
+  mkdir -p "$DIR"
+  chmod 500 "$DIR"
+  run "$PFWD" --config "${DIR}/sub/config.yaml" config --init
+  chmod 700 "$DIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot create the directory: ${DIR}/sub"* ]]
+  [[ "$output" != *'Created:'* ]]
+}

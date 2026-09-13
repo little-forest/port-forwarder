@@ -253,6 +253,35 @@ reset_args() {
   [ "$(grep -c 'missing required key' <<<"$output")" -eq 1 ]
 }
 
+# --- config --system ----------------------------------------------------------
+
+@test "cli: config --system を --init 無しで使うと終了コード 2 になる" {
+  run "$PFWD" config --system
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'--system' requires '--init'"* ]]
+  [[ "$output" == *'usage:'* ]]
+}
+
+@test "cli: 非 Linux の config --init --system は終了コード 1 で何も作らない" {
+  [ "$(uname)" = 'Linux' ] && skip 'Linux では実際にシステム設定を作りに行く'
+  local XDG="${BATS_TEST_TMPDIR}/nonlinux-xdg"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" config --init --system
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Linux (systemd) only'* ]]
+  [[ "$output" == *"(uname: $(uname))"* ]]
+  [[ "$output" != *'Created:'* ]]
+  # 既定パスにフォールバックして作ってしまわないこと
+  [ ! -e "${XDG}/port-forwarder/config.yaml" ]
+}
+
+@test "cli: --system を付けない config --init は従来どおり警告を出さない" {
+  local XDG="${BATS_TEST_TMPDIR}/plain-xdg"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" config --init
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Created: ${XDG}/port-forwarder/config.yaml"* ]]
+  [[ "$output" != *'WARN'* ]]
+}
+
 # --- install-service ----------------------------------------------------------
 
 @test "service: user unit の内容が DESIGN 5.10 に一致する" {
@@ -271,6 +300,29 @@ reset_args() {
   run _service_unit_text system komori '/usr/local/bin/pfwd daemon'
   [[ "$output" == *'User=komori'* ]]
   [[ "$output" == *'WantedBy=multi-user.target'* ]]
+}
+
+@test "service: system unit の ExecStart にシステム設定が固定される" {
+  run _service_unit_text system komori \
+    '/usr/local/bin/pfwd --config /etc/port-forwarder/config.yaml daemon'
+  [[ "$output" == *'ExecStart=/usr/local/bin/pfwd --config /etc/port-forwarder/config.yaml daemon'* ]]
+  [[ "$output" == *'User=komori'* ]]
+  [[ "$output" == *'WantedBy=multi-user.target'* ]]
+}
+
+@test "service: install-service --system はシステム設定が無ければ終了コード 3 で案内する" {
+  [ "$(uname)" = 'Linux' ] || skip 'macOS では install-service 自体が Linux 専用ガードで落ちる'
+  [ -f /etc/port-forwarder/config.yaml ] && skip 'システム設定が実在する環境では検証できない'
+  # ユーザー設定があってもそちらへフォールバックしないこと
+  local XDG="${BATS_TEST_TMPDIR}/svc-xdg"
+  mkdir -p "${XDG}/port-forwarder"
+  cp "${FIXTURES}/basic.yaml" "${XDG}/port-forwarder/config.yaml"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" --no-color install-service --system --run-as "$USER"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *'system config file not found: /etc/port-forwarder/config.yaml'* ]]
+  [[ "$output" == *"config --init --system"* ]]
+  # unit ファイルの書き出しまで到達していないこと
+  [[ "$output" != *'Generated:'* ]]
 }
 
 @test "service: macOS では install-service / uninstall-service はエラーになる" {

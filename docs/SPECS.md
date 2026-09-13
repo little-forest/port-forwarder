@@ -136,7 +136,7 @@ Running `pfwd` with no arguments behaves the same as `pfwd status`.
 
 | Option | Description |
 | --- | --- |
-| `-c, --config <PATH>` | Specify the config file to use; with `config --init` it is where the template is created (see 4.5) |
+| `-c, --config <PATH>` | Specify the config file to use; with `config --init` it is where the template is created and it takes precedence over `--system` (see 4.5) |
 | `-v, --verbose` | Write verbose logs to standard error (`-vv` for even more detail) |
 | `-q, --quiet` | Suppress all output except errors |
 | `--no-color` | Disable colouring (automatically disabled when not a TTY) |
@@ -306,6 +306,33 @@ If the destination is an existing directory it is an error (exit code 1); it is 
 
 `config` takes no positional arguments. Passing one, as in `pfwd config --init ~/foo.yaml`, prints
 the usage and exits with code 2, so that the file is never created at the default path by mistake.
+
+With `--system`, the destination is the system-wide config `/etc/port-forwarder/config.yaml` (8.2).
+This is the same path as passing `-c /etc/port-forwarder/config.yaml`; because that path is part of the
+search order in 4.1, no `Note:` line is printed. Creating it requires write permission, normally root.
+
+```console
+$ sudo pfwd config --init --system
+Created: /etc/port-forwarder/config.yaml
+Edit the file and run 'pfwd test' to validate.
+```
+
+The constraints on `--system` are:
+
+- When `-c, --config <PATH>` is also given, `-c` wins and `--system` is ignored. The fact that it was
+  ignored is reported on stderr as a single line,
+  `[ WARN ] --system is ignored because --config was given`.
+- `pfwd config --system` without `--init` prints the usage and exits with code 2.
+- On a platform other than Linux it exits with code 1, because `/etc/port-forwarder` and system-wide
+  resident operation are assumed on Linux only (see 8.2 / 9).
+
+```console
+$ pfwd config --init --system                  # macOS
+error: --system is for Linux (systemd) only (uname: Darwin). Drop --system, or use 'pfwd --config <PATH> config --init' to choose the path.
+```
+
+When the destination cannot be written (for example when `sudo` was forgotten), no file is created and
+the exit code is 1.
 
 ---
 
@@ -546,6 +573,14 @@ monitoring scripts). `--exit-code` is an option specific to `status`, not one of
 When `/run` is unavailable on macOS, `/usr/local/var/run/port-forwarder/` is used. Note that because
 macOS does not get service registration, system-wide resident operation is assumed on Linux only.
 
+Setting up system-wide residency takes three steps (see 4.5 / 9.1).
+
+```console
+$ sudo pfwd config --init --system                        # create the config under /etc
+$ sudo vi /etc/port-forwarder/config.yaml                 # edit it
+$ sudo pfwd install-service --system --run-as komori --now
+```
+
 ---
 
 ## 9. Service registration
@@ -569,8 +604,15 @@ Run the following to enable:
 - `--system`: generates a system unit at `/etc/systemd/system/port-forwarder.service`. Use
   `--run-as <user-name>` to specify the executing user (running as root is discouraged and a warning is
   shown).
+  - The config file is assumed to be at `/etc/port-forwarder/config.yaml` (8.2); its existence is
+    checked and its contents are validated. There is no fallback to the user config.
+  - If it does not exist, no unit is generated: the command exits with code 3 and points at
+    `pfwd config --init --system` (4.5).
+  - When `-c, --config <PATH>` is also given, that path is used as the premise in the same way.
 - Behaviour of the generated unit:
-  - `ExecStart=/usr/local/bin/pfwd daemon`
+  - `ExecStart`: with `--user`, `/usr/local/bin/pfwd daemon`. With `--system`, the config path is
+    pinned: `/usr/local/bin/pfwd --config /etc/port-forwarder/config.yaml daemon`, so that the personal
+    config of the `--run-as` user is not picked up first by the search order in 4.1.
   - `ExecReload=/bin/kill -HUP $MAINPID`
   - `Restart=on-failure`, `RestartSec=10`
   - `After=network-online.target`
@@ -609,6 +651,11 @@ Every message contains all three of "**what happened / why / what to do about it
 | Unknown entry name | `error: no such entry 'db-pord'` |
 | Config destination is a directory | `error: /home/komori/work is a directory. Specify the config file itself (e.g. /home/komori/work/config.yaml)` |
 | Extra arguments to `config` | `error: 'config' takes no arguments. Use 'pfwd --config <PATH> config --init' to choose where the file is created.` |
+| `--system` on non-Linux | `error: --system is for Linux (systemd) only (uname: Darwin). Drop --system, or use 'pfwd --config <PATH> config --init' to choose the path.` |
+| `--system` without `--init` | `error: '--system' requires '--init'. Use 'pfwd config' to show the path in use.` |
+| System config file not found | `error: system config file not found: /etc/port-forwarder/config.yaml. Run 'sudo pfwd config --init --system' to create it.` |
+| Config file cannot be written | `error: cannot write the config file: /etc/port-forwarder/config.yaml. Creating a file there needs write permission; rerun with sudo.` |
+| Config directory cannot be created | `error: cannot create the directory: /etc/port-forwarder. Creating it there needs write permission; rerun with sudo.` |
 
 ---
 

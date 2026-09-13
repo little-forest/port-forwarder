@@ -58,6 +58,8 @@ _REMOTE_PROBE_WAIT=1.0      # remote probe wait time (sec)
 _MAX_CHECKS_PER_TICK=20     # max health checks per cycle
 _MIN_CHECK_INTERVAL=5       # lower bound of check_interval (SPECS 4.3)
 _CTL_PATH_MAX=100           # max ControlPath length (bytes)
+_SYSTEM_CONFIG_DIR='/etc/port-forwarder'                # system-wide config dir (SPECS 4.1)
+_SYSTEM_CONFIG="${_SYSTEM_CONFIG_DIR}/config.yaml"       # system-wide config file
 
 # common options
 _OPT_CONFIG=
@@ -359,6 +361,15 @@ _calc_name_width() { #{{{
   _NAME_WIDTH=$W
 }
 #}}}
+
+# --system targets /etc and systemd, which only exist on Linux (SPECS 8 / 9)
+_require_linux() { #{{{
+  local OS
+  OS=$(uname)
+  [[ "$OS" == 'Linux' ]] && return 0
+  _error_exit "$_EXIT_ERROR" "$(_err_system_not_linux "$OS")"
+}
+#}}}
 #}}}
 
 #-------------------------------------------------------------------------------
@@ -450,6 +461,11 @@ _err_no_entry()        { echo "no such entry '$1'"; }
 _err_config_is_dir()   { echo "$1 is a directory. Specify the config file itself (e.g. $1/config.yaml)"; }
 _err_config_no_args()  { echo "'config' takes no arguments. Use '${__SCRIPT_NAME} --config <PATH> config --init' to choose where the file is created."; }
 _err_unsupported_yq()  { echo "unsupported yq implementation: $1. pfwd supports mikefarah/yq 4.31+ (https://github.com/mikefarah/yq) and kislyuk/yq 2.14+ with jq (https://github.com/kislyuk/yq)."; }
+_err_system_not_linux(){ echo "--system is for Linux (systemd) only (uname: $1). Drop --system, or use '${__SCRIPT_NAME} --config <PATH> config --init' to choose the path."; }
+_err_system_needs_init(){ echo "'--system' requires '--init'. Use '${__SCRIPT_NAME} config' to show the path in use."; }
+_err_no_system_config(){ echo "system config file not found: $1. Run 'sudo ${__SCRIPT_NAME} config --init --system' to create it."; }
+_err_config_not_writable(){ echo "cannot write the config file: $1. Creating a file there needs write permission; rerun with sudo."; }
+_err_config_mkdir()    { echo "cannot create the directory: $1. Creating it there needs write permission; rerun with sudo."; }
 #}}}
 
 #-------------------------------------------------------------------------------
@@ -552,7 +568,7 @@ _config_find() { #{{{
   fi
   local CANDIDATES=()
   CANDIDATES+=("$(_config_user_path)")
-  CANDIDATES+=('/etc/port-forwarder/config.yaml')
+  CANDIDATES+=("$_SYSTEM_CONFIG")
   for P in "${CANDIDATES[@]}"; do
     if [[ -f "$P" ]]; then
       _CONFIG_FILE=$P
@@ -962,9 +978,10 @@ _config_init() { #{{{
   fi
   DIR=$(dirname "$PATH_")
   if [[ ! -d "$DIR" ]] && ! mkdir -p "$DIR" 2>/dev/null; then
-    _error_exit "$_EXIT_ERROR" "cannot create directory: ${DIR}"
+    _error_exit "$_EXIT_ERROR" "$(_err_config_mkdir "$DIR")"
   fi
-  cat > "$PATH_" <<'PFWD_CONFIG_TEMPLATE'
+  # 2>/dev/null must come BEFORE > "$PATH_", or bash's own redirection error leaks
+  if ! cat 2>/dev/null > "$PATH_" <<'PFWD_CONFIG_TEMPLATE'
 # port-forwarder configuration
 #
 # See 'pfwd help config' and SPECS.md for the full reference.
@@ -997,11 +1014,14 @@ entries:
     # ssh_options:                  # optional: extra ssh -o settings
     #   - Compression=yes
 PFWD_CONFIG_TEMPLATE
+  then
+    _error_exit "$_EXIT_ERROR" "$(_err_config_not_writable "$PATH_")"
+  fi
   chmod 600 "$PATH_" 2>/dev/null
   printf 'Created: %s\n' "$PATH_"
   printf "Edit the file and run '%s test' to validate.\n" "$__SCRIPT_NAME"
   # a path outside the search order of _config_find needs -c on every run
-  if [[ "$PATH_" != "$(_config_user_path)" && "$PATH_" != '/etc/port-forwarder/config.yaml' ]]; then
+  if [[ "$PATH_" != "$(_config_user_path)" && "$PATH_" != "$_SYSTEM_CONFIG" ]]; then
     printf "Note: this path is not searched automatically. Run '%s --config %s <subcommand>'.\n" \
       "$__SCRIPT_NAME" "$PATH_"
   fi
@@ -1019,7 +1039,7 @@ _STATE_KEYS=(status pid ctl since connected_since retry_count backoff \
 
 # determine the runtime directory (DESIGN 3.3)
 _setup_runtime_dir() { #{{{
-  if (( EUID == 0 )) && [[ "$_CONFIG_FILE" == '/etc/port-forwarder/'* ]]; then
+  if (( EUID == 0 )) && [[ "$_CONFIG_FILE" == "${_SYSTEM_CONFIG_DIR}/"* ]]; then
     if [[ "$(uname)" == 'Darwin' ]]; then
       _RUN_DIR='/usr/local/var/run/port-forwarder'
     else
@@ -2050,18 +2070,21 @@ PFWD_HELP
 
 _help_config() { #{{{
   cat <<PFWD_HELP
-usage: ${__SCRIPT_NAME} [-c <PATH>] config [--init [--force]]
+usage: ${__SCRIPT_NAME} [-c <PATH>] config [--init [--system] [--force]]
 
 With no option, show the path of the config file in use.
 
 options:
   --init        create a template config file
+  --system      create it at ${_SYSTEM_CONFIG} (Linux only; needs root)
   --force       overwrite an existing file (with --init)
 
 The file is created at \$XDG_CONFIG_HOME/port-forwarder/config.yaml (or
 ~/.config/port-forwarder/config.yaml). Give -c, --config <PATH> before the
 subcommand to create it somewhere else; that path is not searched
 automatically, so pass -c again when running ${__SCRIPT_NAME}.
+
+--system and -c, --config are mutually exclusive; -c wins.
 PFWD_HELP
 }
 #}}}
@@ -2074,7 +2097,10 @@ Generate a systemd unit for the daemon (Linux only).
 
 options:
   --user        generate a user unit (default)
-  --system      generate a system unit in /etc/systemd/system
+  --system      generate a system unit in /etc/systemd/system; the config
+                must exist at ${_SYSTEM_CONFIG} and is pinned
+                into ExecStart. Run '${__SCRIPT_NAME} config --init --system'
+                first if it does not
   --run-as USER run the system unit as the given user
   --now         run daemon-reload and enable --now afterwards
 PFWD_HELP
@@ -2141,23 +2167,42 @@ _cmd_list() { #{{{
 }
 #}}}
 
+# decide where 'config --init' writes (SPECS 4.5)
+_config_init_target() { #{{{
+  local SYSTEM=$1
+  if [[ -n "$_OPT_CONFIG" ]]; then
+    # -c wins; --system is ignored, but not silently
+    [[ -n "$SYSTEM" ]] && __show_warn '--system is ignored because --config was given'
+    _expand_tilde "$_OPT_CONFIG"
+    return 0
+  fi
+  if [[ -n "$SYSTEM" ]]; then
+    _require_linux
+    printf '%s\n' "$_SYSTEM_CONFIG"
+    return 0
+  fi
+  _config_user_path
+}
+#}}}
+
 _cmd_config() { #{{{
-  local OPT TARGET F INIT='' FORCE=''
+  local OPT TARGET F INIT='' FORCE='' SYSTEM=''
   # the destination is given with -c/--config, never as a positional argument
   (( ${#_ARGS[@]} > 0 )) && _usage "$(_err_config_no_args)"
   for OPT in "${_SUBCMD_OPTS[@]}"; do
     case "$OPT" in
-      --init)  INIT=yes ;;
-      --force) FORCE=yes ;;
-      *)       _usage "unknown option for 'config': ${OPT}" ;;
+      --init)   INIT=yes ;;
+      --force)  FORCE=yes ;;
+      --system) SYSTEM=yes ;;
+      *)        _usage "unknown option for 'config': ${OPT}" ;;
     esac
   done
+  # --system only decides where --init writes; it means nothing on its own
+  [[ -n "$SYSTEM" && -z "$INIT" ]] && _usage "$(_err_system_needs_init)"
   if [[ -n "$INIT" ]]; then
-    if [[ -n "$_OPT_CONFIG" ]]; then
-      TARGET=$(_expand_tilde "$_OPT_CONFIG")
-    else
-      TARGET=$(_config_user_path)
-    fi
+    # the command substitution runs in a subshell, so _require_linux's exit
+    # inside _config_init_target only ends that subshell; propagate it here
+    TARGET=$(_config_init_target "$SYSTEM") || exit "$?"
     _config_init "$TARGET" "$FORCE"
     return 0
   fi
@@ -2736,6 +2781,17 @@ _cmd_install_service() { #{{{
     esac
   done
 
+  # --system looks at the system-wide config only; checked before _config_setup
+  # so that _config_find cannot answer with _err_no_config's --system-less advice
+  if [[ "$SCOPE" == 'system' && -z "$_OPT_CONFIG" ]]; then
+    _require_linux
+    [[ -f "$_SYSTEM_CONFIG" ]] \
+      || _error_exit "$_EXIT_CONFIG" "$(_err_no_system_config "$_SYSTEM_CONFIG")"
+    # pins _config_find to /etc and puts --config into ExecStart below
+    _OPT_CONFIG=$_SYSTEM_CONFIG
+  fi
+  _config_setup
+
   EXEC="$(_self_path) "
   [[ -n "$_OPT_CONFIG" ]] && EXEC="${EXEC}--config ${_CONFIG_FILE} "
   EXEC="${EXEC}daemon"
@@ -2975,7 +3031,8 @@ case "$_SUBCMD" in
     _cmd_test ;;
   install-service)
     _check_prerequisites
-    _config_setup
+    # _config_setup runs inside the command: --system is only known after
+    # the subcommand options have been scanned
     _cmd_install_service ;;
   uninstall-service)
     _cmd_uninstall_service ;;

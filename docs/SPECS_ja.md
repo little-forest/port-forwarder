@@ -123,7 +123,7 @@ pfwd <サブコマンド> [オプション] [エントリ名...]
 
 | オプション | 説明 |
 | --- | --- |
-| `-c, --config <PATH>` | 使用する設定ファイルを指定する。`config --init` では雛形の作成先になる（4.5 参照） |
+| `-c, --config <PATH>` | 使用する設定ファイルを指定する。`config --init` では雛形の作成先になり、`--system` より優先される（4.5 参照） |
 | `-v, --verbose` | 詳細ログを標準エラー出力に出す（`-vv` でさらに詳細） |
 | `-q, --quiet` | エラー以外の出力を抑制する |
 | `--no-color` | 色付けを無効化する（非 TTY 時は自動で無効） |
@@ -279,6 +279,31 @@ Note: this path is not searched automatically. Run 'pfwd --config /home/komori/w
 
 `config` は位置引数を取らない。`pfwd config --init ~/foo.yaml` のように指定した場合は、既定パスへ
 意図せず作成されることを防ぐため usage を表示して終了コード 2 で終わる。
+
+`--system` を付けると、システム全体設定 `/etc/port-forwarder/config.yaml`（8.2）を作成先にする。
+これは `-c /etc/port-forwarder/config.yaml` を指定した場合と同じ経路であり、当該パスは 4.1 の探索対象
+であるため `Note:` 行は出ない。作成には書き込み権限（通常は root）が必要である。
+
+```console
+$ sudo pfwd config --init --system
+Created: /etc/port-forwarder/config.yaml
+Edit the file and run 'pfwd test' to validate.
+```
+
+`--system` の制約は以下のとおり。
+
+- `-c, --config <PATH>` を併用した場合は `-c` が優先され、`--system` は無視される。無視したことは
+  `[ WARN ] --system is ignored because --config was given` として標準エラー出力に 1 行表示する。
+- `--init` を伴わない `pfwd config --system` は usage を表示して終了コード 2 で終わる。
+- Linux 以外のプラットフォームで指定した場合は終了コード 1 で終わる（`/etc/port-forwarder` と
+  システム全体での常駐運用は Linux のみを想定するため。8.2 / 9 参照）。
+
+```console
+$ pfwd config --init --system                  # macOS
+error: --system is for Linux (systemd) only (uname: Darwin). Drop --system, or use 'pfwd --config <PATH> config --init' to choose the path.
+```
+
+作成先に書き込めない場合（`sudo` を付け忘れた場合など）はファイルを作らず終了コード 1 で終わる。
 
 ---
 
@@ -492,6 +517,14 @@ yq:     mikefarah/yq v4.53.3
 
 macOS で `/run` が使えない場合は `/usr/local/var/run/port-forwarder/` を使用する。なお macOS ではサービス登録を行わないため、システム全体での常駐運用は Linux のみを想定する。
 
+システム全体で常駐させるまでの手順は以下の 3 ステップである（4.5 / 9.1）。
+
+```console
+$ sudo pfwd config --init --system                        # 設定を /etc に作る
+$ sudo vi /etc/port-forwarder/config.yaml                 # 編集する
+$ sudo pfwd install-service --system --run-as komori --now
+```
+
 ---
 
 ## 9. サービス登録
@@ -511,8 +544,14 @@ Run the following to enable:
 
 - `--user`（既定）: ユーザー単位の systemd unit を生成する。SSH 鍵・`ssh-agent` の扱いが素直なため推奨。
 - `--system`: システム単位の unit を `/etc/systemd/system/port-forwarder.service` に生成する。`--run-as <ユーザー名>` で実行ユーザーを指定する（root 実行は非推奨、警告を表示）。
+  - 設定ファイルは `/etc/port-forwarder/config.yaml`（8.2）にある前提で存在を確認し、内容の検証まで行う。
+    ユーザー設定へのフォールバックは行わない。
+  - 設定ファイルが無い場合は unit を生成せず、終了コード 3 で `pfwd config --init --system`（4.5）を案内する。
+  - `-c, --config <PATH>` を併用した場合は、そのパスを前提として同様に扱う。
 - 生成される unit の振る舞い:
-  - `ExecStart=/usr/local/bin/pfwd daemon`
+  - `ExecStart`: `--user` では `/usr/local/bin/pfwd daemon`。`--system` では設定ファイルのパスを固定して
+    `/usr/local/bin/pfwd --config /etc/port-forwarder/config.yaml daemon` とする（`--run-as` で指定した
+    ユーザーの個人設定が 4.1 の探索順で先に当たることを防ぐため）。
   - `ExecReload=/bin/kill -HUP $MAINPID`
   - `Restart=on-failure`、`RestartSec=10`
   - `After=network-online.target`
@@ -546,6 +585,11 @@ Run the following to enable:
 | 未知のエントリ名 | `error: no such entry 'db-pord'` |
 | 設定ファイル作成先がディレクトリ | `error: /home/komori/work is a directory. Specify the config file itself (e.g. /home/komori/work/config.yaml)` |
 | `config` に余分な引数 | `error: 'config' takes no arguments. Use 'pfwd --config <PATH> config --init' to choose where the file is created.` |
+| 非 Linux で `--system` | `error: --system is for Linux (systemd) only (uname: Darwin). Drop --system, or use 'pfwd --config <PATH> config --init' to choose the path.` |
+| `--init` を伴わない `--system` | `error: '--system' requires '--init'. Use 'pfwd config' to show the path in use.` |
+| システム設定ファイル未検出 | `error: system config file not found: /etc/port-forwarder/config.yaml. Run 'sudo pfwd config --init --system' to create it.` |
+| 設定ファイルを作成できない | `error: cannot write the config file: /etc/port-forwarder/config.yaml. Creating a file there needs write permission; rerun with sudo.` |
+| 設定ディレクトリを作成できない | `error: cannot create the directory: /etc/port-forwarder. Creating it there needs write permission; rerun with sudo.` |
 
 ---
 
