@@ -12,3 +12,4 @@ registries:
   ref: v4.558.1 # renovate: depName=aquaproj/aqua-registry
 packages:
 - name: bats-core/bats-core@v1.14.0
+- name: go-task/task@v3.52.0

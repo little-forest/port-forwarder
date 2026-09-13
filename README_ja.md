@@ -344,12 +344,13 @@ $ pfwd logs db-prod     # 該当エントリの行のみ抽出
 ## 開発
 
 ```console
-$ bats test/                                    # ユニットテスト
-$ PFWD_IT=1 bats test/test_integration.bats     # 統合テスト（localhost への鍵認証 sshd と python3 が必要）
-$ shellcheck -x -s bash pfwd install.sh         # 静的検査
+$ task test                                     # ユニットテスト
+$ task test-integration                         # 統合テスト（localhost への鍵認証 sshd と python3 が必要）
+$ task lint                                     # 静的検査
+$ task check                                    # 構文チェック（install.sh は動作対象の bash 3.2 でチェック）
 ```
 
-テスト用ツールは [aqua](https://aquaproj.github.io/) で管理している（`aqua.yaml`）。
+テスト用ツールは [aqua](https://aquaproj.github.io/) で管理している（`aqua.yaml`）。`task` コマンド自体も aqua が管理する（`go-task/task`）。
 
 ## 制限事項
 

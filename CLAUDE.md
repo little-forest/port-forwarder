@@ -53,14 +53,14 @@ test/
 ## Development Commands
 
 ```bash
-bats test/                                  # Unit tests
-PFWD_IT=1 bats test/test_integration.bats   # Integration tests (requires sshd on localhost + key auth + python3)
-shellcheck -x -s bash pfwd install.sh       # Static analysis (keep at zero findings)
-bash -n pfwd                                # Syntax check
-/bin/bash -n install.sh                     # Syntax check with the bash 3.2 that install.sh has to run on
+task test                                   # Unit tests
+task test-integration                       # Integration tests (requires sshd on localhost + key auth + python3)
+task lint                                   # Static analysis (keep at zero findings)
+task check                                  # Syntax check (install.sh is checked against the bash 3.2 it must run under)
 ```
 
-Test tooling is managed with [aqua](https://aquaproj.github.io/) (`aqua.yaml`).
+Test tooling (bats-core, go-task/task) is managed with [aqua](https://aquaproj.github.io/) (`aqua.yaml`);
+the `task` targets above are defined in `Taskfile.yml`.
 
 ## Architecture
 
@@ -92,7 +92,7 @@ Sourcing must always happen at file scope so that associative arrays do not beco
 `install.sh` is fetched and piped into bash (`curl -fsSL .../install.sh | bash`), which means it
 runs under whatever `/bin/bash` the user has — **on macOS that is 3.2**. None of the bash 4
 features `pfwd` itself depends on (associative arrays, `declare -g`, `${var^^}`,
-`printf '%(%s)T'`) may be used in this file. Verify with `/bin/bash -n install.sh` on macOS.
+`printf '%(%s)T'`) may be used in this file. Verify with `task check` (runs `/bin/bash -n install.sh`) on macOS.
 
 - `main "$@"` is on the very last line, so a truncated download executes nothing.
 - It installs the tag of the latest GitHub release. **There is deliberately no fallback to `main`**;
