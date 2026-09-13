@@ -62,7 +62,7 @@ teardown() {
   local MODE
   # shellcheck disable=SC2119
   __make_tmp >/dev/null
-  MODE=$(stat -f '%Lp' "$__TMP_BASE" 2>/dev/null || stat -c '%a' "$__TMP_BASE")
+  MODE=$(perm_of "$__TMP_BASE")
   [ "$MODE" = '700' ]
 }
 
