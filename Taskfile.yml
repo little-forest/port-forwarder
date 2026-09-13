@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  test:
+    desc: Run unit tests
+    cmds:
+      - bats test/
+
+  test-integration:
+    desc: Run integration tests (requires sshd on localhost with key auth, and python3)
+    cmds:
+      - PFWD_IT=1 bats test/test_integration.bats
+
+  lint:
+    desc: Run shellcheck static analysis
+    cmds:
+      - shellcheck -x -s bash pfwd install.sh
+
+  check:
+    desc: Syntax-check pfwd and install.sh (install.sh is checked against the bash 3.2 it must run under)
+    cmds:
+      - bash -n pfwd
+      - /bin/bash -n install.sh

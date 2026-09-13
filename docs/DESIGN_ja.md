@@ -1007,8 +1007,8 @@ test/
 ### 10.3 静的検査
 
 ```
-shellcheck -x -s bash pfwd
-bash -n pfwd
+task lint
+task check
 ```
 
 CI での実行を前提に、shellcheck の指摘は 0 件を維持する（抑止コメントは理由付きで最小限）。

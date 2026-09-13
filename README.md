@@ -345,12 +345,13 @@ The main exit codes are `0` (success), `1` (general runtime error), `2` (bad arg
 ## Development
 
 ```console
-$ bats test/                                    # unit tests
-$ PFWD_IT=1 bats test/test_integration.bats     # integration tests (needs sshd on localhost with key auth, and python3)
-$ shellcheck -x -s bash pfwd install.sh         # static checks
+$ task test                                     # unit tests
+$ task test-integration                         # integration tests (needs sshd on localhost with key auth, and python3)
+$ task lint                                     # static checks
+$ task check                                    # syntax check (install.sh is checked against the bash 3.2 it must run under)
 ```
 
-The test toolchain is managed with [aqua](https://aquaproj.github.io/) (`aqua.yaml`).
+The test toolchain is managed with [aqua](https://aquaproj.github.io/) (`aqua.yaml`). The `task` command itself is also managed by aqua (`go-task/task`).
 
 ## Limitations
 
