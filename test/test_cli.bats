@@ -253,6 +253,35 @@ reset_args() {
   [ "$(grep -c 'missing required key' <<<"$output")" -eq 1 ]
 }
 
+# --- config --system ----------------------------------------------------------
+
+@test "cli: config --system を --init 無しで使うと終了コード 2 になる" {
+  run "$PFWD" config --system
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'--system' requires '--init'"* ]]
+  [[ "$output" == *'usage:'* ]]
+}
+
+@test "cli: 非 Linux の config --init --system は終了コード 1 で何も作らない" {
+  [ "$(uname)" = 'Linux' ] && skip 'Linux では実際にシステム設定を作りに行く'
+  local XDG="${BATS_TEST_TMPDIR}/nonlinux-xdg"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" config --init --system
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Linux (systemd) only'* ]]
+  [[ "$output" == *"(uname: $(uname))"* ]]
+  [[ "$output" != *'Created:'* ]]
+  # 既定パスにフォールバックして作ってしまわないこと
+  [ ! -e "${XDG}/port-forwarder/config.yaml" ]
+}
+
+@test "cli: --system を付けない config --init は従来どおり警告を出さない" {
+  local XDG="${BATS_TEST_TMPDIR}/plain-xdg"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" config --init
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Created: ${XDG}/port-forwarder/config.yaml"* ]]
+  [[ "$output" != *'WARN'* ]]
+}
+
 # --- install-service ----------------------------------------------------------
 
 @test "service: user unit の内容が DESIGN 5.10 に一致する" {
