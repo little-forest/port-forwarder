@@ -302,6 +302,29 @@ reset_args() {
   [[ "$output" == *'WantedBy=multi-user.target'* ]]
 }
 
+@test "service: system unit の ExecStart にシステム設定が固定される" {
+  run _service_unit_text system komori \
+    '/usr/local/bin/pfwd --config /etc/port-forwarder/config.yaml daemon'
+  [[ "$output" == *'ExecStart=/usr/local/bin/pfwd --config /etc/port-forwarder/config.yaml daemon'* ]]
+  [[ "$output" == *'User=komori'* ]]
+  [[ "$output" == *'WantedBy=multi-user.target'* ]]
+}
+
+@test "service: install-service --system はシステム設定が無ければ終了コード 3 で案内する" {
+  [ "$(uname)" = 'Linux' ] || skip 'macOS では install-service 自体が Linux 専用ガードで落ちる'
+  [ -f /etc/port-forwarder/config.yaml ] && skip 'システム設定が実在する環境では検証できない'
+  # ユーザー設定があってもそちらへフォールバックしないこと
+  local XDG="${BATS_TEST_TMPDIR}/svc-xdg"
+  mkdir -p "${XDG}/port-forwarder"
+  cp "${FIXTURES}/basic.yaml" "${XDG}/port-forwarder/config.yaml"
+  run env XDG_CONFIG_HOME="$XDG" "$PFWD" --no-color install-service --system --run-as "$USER"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *'system config file not found: /etc/port-forwarder/config.yaml'* ]]
+  [[ "$output" == *"config --init --system"* ]]
+  # unit ファイルの書き出しまで到達していないこと
+  [[ "$output" != *'Generated:'* ]]
+}
+
 @test "service: macOS では install-service / uninstall-service はエラーになる" {
   [ "$(uname)" = 'Darwin' ] || skip 'macOS 以外では対象外'
   run "$PFWD" --config "${FIXTURES}/basic.yaml" install-service

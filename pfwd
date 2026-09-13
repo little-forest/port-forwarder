@@ -2097,7 +2097,10 @@ Generate a systemd unit for the daemon (Linux only).
 
 options:
   --user        generate a user unit (default)
-  --system      generate a system unit in /etc/systemd/system
+  --system      generate a system unit in /etc/systemd/system; the config
+                must exist at ${_SYSTEM_CONFIG} and is pinned
+                into ExecStart. Run '${__SCRIPT_NAME} config --init --system'
+                first if it does not
   --run-as USER run the system unit as the given user
   --now         run daemon-reload and enable --now afterwards
 PFWD_HELP
@@ -2778,6 +2781,17 @@ _cmd_install_service() { #{{{
     esac
   done
 
+  # --system looks at the system-wide config only; checked before _config_setup
+  # so that _config_find cannot answer with _err_no_config's --system-less advice
+  if [[ "$SCOPE" == 'system' && -z "$_OPT_CONFIG" ]]; then
+    _require_linux
+    [[ -f "$_SYSTEM_CONFIG" ]] \
+      || _error_exit "$_EXIT_CONFIG" "$(_err_no_system_config "$_SYSTEM_CONFIG")"
+    # pins _config_find to /etc and puts --config into ExecStart below
+    _OPT_CONFIG=$_SYSTEM_CONFIG
+  fi
+  _config_setup
+
   EXEC="$(_self_path) "
   [[ -n "$_OPT_CONFIG" ]] && EXEC="${EXEC}--config ${_CONFIG_FILE} "
   EXEC="${EXEC}daemon"
@@ -3017,7 +3031,8 @@ case "$_SUBCMD" in
     _cmd_test ;;
   install-service)
     _check_prerequisites
-    _config_setup
+    # _config_setup runs inside the command: --system is only known after
+    # the subcommand options have been scanned
     _cmd_install_service ;;
   uninstall-service)
     _cmd_uninstall_service ;;
