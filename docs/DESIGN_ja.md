@@ -56,7 +56,7 @@
 | ローカル変数 | 関数内で必ず `local` 宣言し、大文字スネークケース |
 | 色 | `__setup_color` で定義される `C_GREEN` / `C_YELLOW` / `C_RED` / `C_GREY` / `C_OFF` を使う。非 TTY・`--no-color` 時は `__setup_color` を呼ばず、変数が空文字のまま無害に展開されることを利用する |
 | 終了処理 | `__script_end_*` という名前の関数を定義すると `trap EXIT` から自動実行される仕組みを利用する |
-| 一時ファイル | `__make_tmp` / `__get_tmp_base` を使い、終了時に `__script_end_clean_tmp` が掃除する |
+| 一時ファイル | ベースパスはファイルスコープの `__TMP_BASE` 1 か所で確定する。`__make_tmp` がそれを遅延生成して一時ファイルを作り、終了時に `__script_end_clean_tmp` が**同じ変数を見て**削除する |
 | 静的検査 | shellcheck を通す。抑止は必要最小限とし、必ず理由をコメントで添える |
 
 #### ヘッダ書式
@@ -80,8 +80,9 @@
 | `__show_info` / `__show_warn` / `__show_error` | ユーザー向けメッセージ出力。`__show_error` のみ stderr に出す |
 | `__error_end` | `__show_error` を出して終了する |
 | `__script_end` | `trap EXIT` から呼ばれ、`__script_end_*` という名前の関数をすべて名前順に実行する |
-| `__get_tmp_base` / `__make_tmp` | 一時ディレクトリ・一時ファイルの作成 |
-| `__script_end_clean_tmp` | 終了時に一時ディレクトリを削除する（`__script_end` から自動実行される） |
+| `__get_tmp_base` | `__TMP_BASE` を返すアクセサ（共有ボイラープレートとの互換のために残している） |
+| `__make_tmp` | ベースディレクトリ（`__TMP_BASE`）を遅延生成し、その中に一時ファイルを作る。生成に失敗したら 1 を返す |
+| `__script_end_clean_tmp` | 終了時に `__TMP_BASE` を削除する（`__script_end` から自動実行される） |
 
 ### 2.2 本スクリプトで追加する規約
 
@@ -119,7 +120,7 @@ _show_result <RESULT> <NAME> <MESSAGE>
 
 ```
  1. ヘッダコメント                       2.1 のヘッダ書式（ファイル名・日付・Copyright）
- 2. common global variables              __SCRIPT_BASE / __SCRIPT_NAME / __SILENT
+ 2. common global variables              __SCRIPT_BASE / __SCRIPT_NAME / __TMP_BASE / __SILENT
  3. global variables                     _VERSION / _CONFIG_FILE / _RUN_DIR / 連想配列群 / 終了コード定数
  4. common functions                     __ 始まりの共通基盤関数（__setup, __setup_color, __show_*, __make_tmp ...）
  5. utility functions                    _now / _epoch_to_hms / _expand_tilde / _in_array
@@ -943,6 +944,7 @@ yq 実装の判定（`_yq_detect`）は**正常経路の外部コマンド起動
 | 項目 | 実装 |
 | --- | --- |
 | 実行時ディレクトリ | `umask 077` を起動直後に設定し、`_RUN_DIR` は `0700` |
+| 一時ディレクトリ | `__TMP_BASE` は `mkdir -m 700` で作る。`umask 077` の設定前や、関数定義だけを読み込む経路でも `0700` を保証するため、umask に依存させない |
 | ログ | `_sanitize` を経由し、制御文字を除去する。ssh の stderr をそのまま転記しない（分類済みメッセージ + 該当行 1 行のみ） |
 | 秘密情報 | 鍵の内容・パスフレーズは一切扱わない。`BatchMode=yes` により入力を要求しない。ホスト名・ユーザー名はログに出す（SPECS 11 章） |
 | ホスト鍵 | `StrictHostKeyChecking=yes` を固定。ユーザーの `ssh_options` で `StrictHostKeyChecking=no` が指定された場合は**警告を出したうえで指定に従う**（ユーザーの明示的な選択を尊重する） |
@@ -983,6 +985,7 @@ test/
 ├── test_state.bats
 ├── test_statemachine.bats
 ├── test_probe.bats
+├── test_tmp.bats            一時ディレクトリのパス確定・遅延生成・削除
 ├── test_cli.bats
 └── test_integration.bats    実際に localhost へ ssh する（環境変数で明示的に有効化）
 ```
@@ -997,6 +1000,7 @@ test/
 | `test_state` | state のアトミック書き込み / 読み書きの往復 / desired の既定値（ファイル無し時は `enabled` に従う） / `_state_transit` がログを 1 行出すこと |
 | `test_statemachine` | `_daemon_tick_entry` を `_ssh_*` / `_health_check` のスタブと組み合わせ、SPECS 5.1 の全遷移を検証。バックオフ列（5→10→20→…→300 で頭打ち） / 60 秒継続でのリセット / `retry_limit` 到達で `failed` / ポート使用中で即 `failed` |
 | `test_probe` | `nc -l` で立てたポートに対する `_probe_tcp` / 未使用ポートでの `_is_port_free` / 接続直後に閉じるサーバに対する `_probe_forward` が 1 を返すこと / 接続を保持するサーバに対して 0 を返すこと |
+| `test_tmp` | `__TMP_BASE` が絶対パスで確定し source 時点では作られないこと / `__get_tmp_base` が同じ値を返すこと / `__make_tmp` の遅延生成と `0700` / 生成に失敗したら 1 を返すこと / コマンド置換越しに呼んでも親から同じディレクトリに届くこと / `__script_end_clean_tmp` の削除と、未生成でも 0 を返すこと |
 | `test_cli` | 引数解析（`--config=` 形式を含む） / 引数なしで `status` になること / 未知エントリ名で終了コード 2 / デーモン未起動時の `start` が終了コード 5 / `--exit-code` の挙動 / `_fmt_uptime` の整形 / 出力表の桁揃え |
 | `test_integration` | `PFWD_IT=1` のときのみ実行。`localhost` への ssh でデーモンを起動し、`up` → `status` → `stop` → `down` を通す。ssh プロセスを外部から kill して再接続を確認する |
 
