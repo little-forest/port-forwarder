@@ -115,6 +115,15 @@ Edit the file and run 'pfwd test' to validate.
 Note: this path is not searched automatically. Run 'pfwd --config /home/komori/work/pfwd.yaml <subcommand>'.
 ```
 
+To create the config used system-wide, add `--system` (Linux only; writing needs root). It is created
+at `/etc/port-forwarder/config.yaml`, which is searched automatically, so `-c` is not needed later.
+
+```console
+$ sudo pfwd config --init --system
+Created: /etc/port-forwarder/config.yaml
+Edit the file and run 'pfwd test' to validate.
+```
+
 ### 2. Edit the config file
 
 The `example` entry in the template has `enabled: false`. Rewrite it for your own destination and set `enabled: true`.
@@ -261,7 +270,7 @@ pfwd <subcommand> [options] [entry...]
 | `test [name...]` | Validate the config and check connectivity (no forward is created) |
 | `install-service` | Generate and register a systemd unit (Linux only) |
 | `uninstall-service` | Remove the systemd unit (Linux only) |
-| `config` | Show the config file in use (`--init` writes a template; `-c <PATH>` chooses where) |
+| `config` | Show the config file in use (`--init` writes a template; `-c <PATH>` or `--system` chooses where) |
 | `version` | Show the version |
 | `help [subcommand]` | Show help |
 
@@ -271,7 +280,7 @@ Run `pfwd help <subcommand>` for the options specific to each subcommand.
 
 | Option | Description |
 | --- | --- |
-| `-c, --config <PATH>` | Use the specified config file (with `config --init`, where the template is created) |
+| `-c, --config <PATH>` | Use the specified config file (with `config --init`, where the template is created; it wins over `--system`) |
 | `-v, --verbose` | Verbose output to stderr (`-vv` for more) |
 | `-q, --quiet` | Suppress everything but errors |
 | `--no-color` | Disable colored output |
@@ -295,8 +304,17 @@ Run the following to enable:
 
 - `--user` (default) generates a user unit. Recommended, since SSH keys and `ssh-agent` are handled naturally.
 - `--system` writes to `/etc/systemd/system/port-forwarder.service`. Use `--run-as <user>` to pick the user; omitting it means running as root and prints a warning.
+- With `--system`, the config is assumed to be at `/etc/port-forwarder/config.yaml`: its existence is checked and its contents validated. If it is missing, no unit is written and `pfwd config --init --system` is suggested. That path is pinned into the unit's `ExecStart` via `--config`, so the personal config of the `--run-as` user is never picked up.
 - `--now` additionally runs `daemon-reload` and `enable --now`.
 - Remove it with `pfwd uninstall-service [--user|--system]`.
+
+Setting it up system-wide takes three steps.
+
+```console
+$ sudo pfwd config --init --system
+$ sudo vi /etc/port-forwarder/config.yaml
+$ sudo pfwd install-service --system --run-as komori --now
+```
 
 macOS has no service registration. Use `pfwd up` to run the daemon in the background instead.
 

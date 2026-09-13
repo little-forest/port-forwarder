@@ -2,7 +2,7 @@
 title: --system でシステム全体設定 /etc/port-forwarder/config.yaml を扱えるようにする
 created: 2026-09-13
 updated: 2026-09-13
-status: 実装中
+status: 実装済み
 ---
 
 # 要求

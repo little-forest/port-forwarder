@@ -121,7 +121,7 @@ _show_result <RESULT> <NAME> <MESSAGE>
 ```
  1. ヘッダコメント                       2.1 のヘッダ書式（ファイル名・日付・Copyright）
  2. common global variables              __SCRIPT_BASE / __SCRIPT_NAME / __TMP_BASE / __SILENT
- 3. global variables                     _VERSION / _CONFIG_FILE / _RUN_DIR / 連想配列群 / 終了コード定数
+ 3. global variables                     _VERSION / _CONFIG_FILE / _RUN_DIR / 連想配列群 / 終了コード定数 / 内部定数
  4. common functions                     __ 始まりの共通基盤関数（__setup, __setup_color, __show_*, __make_tmp ...）
  5. utility functions                    _now / _epoch_to_hms / _expand_tilde / _in_array
  6. logging functions                    _log_init / _log / _debug
@@ -135,6 +135,16 @@ _show_result <RESULT> <NAME> <MESSAGE>
 14. main process                         引数解析 → 前提チェック → サブコマンドディスパッチ
 15. vim modeline
 ```
+
+セクション 3 の内部定数のうち、パスに関わるものは次の 2 つ。`/etc/port-forwarder/config.yaml` は
+`_config_find` の探索候補・`_config_init` の `Note:` 判定・`_setup_runtime_dir` のシステム判定・
+`config --init --system` / `install-service --system` の 4 系統から参照されるため、リテラルを散在させず
+ここで 1 度だけ定義する。
+
+| 定数 | 値 | 用途 |
+| --- | --- | --- |
+| `_SYSTEM_CONFIG_DIR` | `/etc/port-forwarder` | システム全体設定のディレクトリ（SPECS 4.1 / 8.2） |
+| `_SYSTEM_CONFIG` | `${_SYSTEM_CONFIG_DIR}/config.yaml` | システム全体設定ファイル |
 
 セクション 14 の直前に、**bats からの読み込み用ガード**を置く。
 
@@ -159,12 +169,14 @@ _show_result <RESULT> <NAME> <MESSAGE>
 
 ### 3.3 実行時ディレクトリ
 
-起動時に実行モードを判定し、`_RUN_DIR` を決定する。
+起動時に実行モードを判定し、`_RUN_DIR` を決定する。判定条件は変えていないが、パスの参照は
+3.1 の定数 `_SYSTEM_CONFIG_DIR` を経由する。`install-service --system` は `_OPT_CONFIG` を
+`_SYSTEM_CONFIG` に固定するため、生成された unit から起動したデーモンは自然にシステムモードに入る。
 
 | モード | 判定 | `_RUN_DIR` |
 | --- | --- | --- |
 | ユーザー | 既定 | `${XDG_RUNTIME_DIR}/port-forwarder`（`XDG_RUNTIME_DIR` 未設定時は `~/.local/state/port-forwarder/run`） |
-| システム | 実効 UID が 0、かつ `/etc/port-forwarder/config.yaml` を採用した場合 | Linux: `/run/port-forwarder` / macOS: `/usr/local/var/run/port-forwarder` |
+| システム | 実効 UID が 0、かつ `${_SYSTEM_CONFIG_DIR}/` 配下の設定ファイルを採用した場合 | Linux: `/run/port-forwarder` / macOS: `/usr/local/var/run/port-forwarder` |
 
 構成:
 
@@ -359,6 +371,7 @@ host / user / port / identity / local_port / remote_host / remote_port / bind_ad
 | `_in_array` | 値 配列要素... | 0/1 | 存在判定 |
 | `_truncate` | 文字列 幅 | stdout | 幅超過時に末尾を `...` に置換（SPECS 6.2 の SSH 列） |
 | `_sanitize` | 文字列 | stdout | 改行・タブ・制御文字を空白に置換（state / ログ書き込み前に必ず通す） |
+| `_require_linux` | - | 0 / 終了 | `uname` が `Linux` でなければ `_EXIT_ERROR` で終了する。`--system` は `/etc/port-forwarder` と systemd を前提にするため（SPECS 8.2 / 9）。`config` と `install-service` の両方から呼ぶ |
 
 ### 5.2 ログ
 
@@ -377,7 +390,7 @@ host / user / port / identity / local_port / remote_host / remote_port / bind_ad
 
 | 関数 | 説明 |
 | --- | --- |
-| `_config_find` | `--config` → `$XDG_CONFIG_HOME/port-forwarder/config.yaml` → `~/.config/...` → `/etc/port-forwarder/config.yaml` の順で探索し `_CONFIG_FILE` を決定。見つからなければ終了コード 3 |
+| `_config_find` | `--config` → `$XDG_CONFIG_HOME/port-forwarder/config.yaml` → `~/.config/...` → `_SYSTEM_CONFIG` の順で探索し `_CONFIG_FILE` を決定。見つからなければ終了コード 3 |
 | `_config_file_list` | メイン設定 + 同階層 `conf.d/*.yaml`・`*.yml` を名前順で並べた配列 `_CONFIG_FILES` を作る |
 | `_config_load` | `_CONFIG_FILES` を順に `_config_parse_file` に渡し、4.1 節のマージ規則で `_CFG` を構築する |
 | `_config_parse_file <path>` | 4.1 節の yq クエリ 0〜4 を実行し、0x1f 区切りの行を読み込む |
@@ -389,7 +402,8 @@ host / user / port / identity / local_port / remote_host / remote_port / bind_ad
 | `_config_apply_defaults` | 4.2 節 |
 | `_config_validate` | 4.3 節 |
 | `_config_check_perms` | 設定ファイルが他ユーザーから書き込み可能なら警告（SPECS 11 章） |
-| `_config_init <path>` | 雛形生成（SPECS 4.5）。heredoc でコメント付きテンプレートを書き出す。既存時は `--force` が無ければエラー |
+| `_config_init_target <SYSTEM>` | `config --init` の作成先だけを決めて stdout に返す（SPECS 4.5）。`_OPT_CONFIG` があればそれを優先し、`--system` が併用されていれば `__show_warn` で無視した旨を stderr に出す。`_OPT_CONFIG` が無く `--system` なら `_require_linux` の後に `_SYSTEM_CONFIG`、どちらも無ければ `_config_user_path`。呼び出し側は `$( )` で受けるため、`_require_linux` の終了はサブシェル止まりになる。戻り値を見て呼び出し元が終了コードを引き継ぐ |
+| `_config_init <path>` | 雛形生成（SPECS 4.5）。heredoc でコメント付きテンプレートを書き出す。既存時は `--force` が無ければエラー。書き出しは `cat 2>/dev/null > "$PATH_"` の順で行い（`2>/dev/null` を先に置かないとシェル自身のリダイレクトエラーが漏れる）、失敗したら `Created:` を出さずに終了コード 1 とする |
 
 ### 5.4 状態
 
@@ -691,9 +705,9 @@ _daemon_shutdown:
 | `_cmd_reload` | デーモンに SIGHUP → 完了を `daemon.meta` の更新時刻で確認（最大 5 秒） |
 | `_cmd_logs` | `log_file` 未指定時は systemd / launchd のログ参照方法を案内して終了（SPECS 6.5）。指定時は `tail`（`-f` なら `tail -f`）。エントリ名指定時は `grep -F "[<name>]"` でフィルタする |
 | `_cmd_test` | 設定検証 + `ssh -o BatchMode=yes -O none` ではなく、`ssh <共通オプション> -o ConnectTimeout=N <host> true` で到達性を確認し、`_is_port_free` でローカルポートを確認する。**フォワードは張らない**。結果を `[  OK  ]` / `[ WARN ]` / `[FAILED]` で表示し、失敗があれば終了コード 4 |
-| `_cmd_install_service` | macOS では非対応エラー。`--user`（既定） / `--system` / `--run-as` / `--now` を解析し、heredoc で unit を生成する |
+| `_cmd_install_service` | macOS では非対応エラー。`--user`（既定） / `--system` / `--run-as` / `--now` を解析し、heredoc で unit を生成する。`--system` かつ `-c` 未指定なら `_require_linux` の後に `_SYSTEM_CONFIG` の存在を確認し（無ければ終了コード 3 で `config --init --system` を案内）、`_OPT_CONFIG` に代入する。この 1 行で `_config_find` が `/etc` 固定になり、既存の `[[ -n "$_OPT_CONFIG" ]]` 分岐によって `ExecStart` に `--config` が入る。`_config_setup` は main ディスパッチではなく**この関数の中**で呼ぶ（`--system` はオプション走査が終わるまで判明しないため）。存在確認は `_config_setup` より先に置く ── `_config_find` の `_err_no_config` は `--system` なしの手順を案内してしまうため |
 | `_cmd_uninstall_service` | unit を停止・disable してから削除する |
-| `_cmd_config` | `--init` / `--force` / 引数なし（パス表示）。位置引数は受け付けず、渡されたら `_usage` で終了コード 2 とする（既定パスへの意図しない作成を防ぐため）。`--init` の作成先は `_OPT_CONFIG` があればそれ（`_expand_tilde` 済み）、無ければ `_config_user_path`。作成先が `_config_find` の探索候補（`_config_user_path` / `/etc/port-forwarder/config.yaml`）以外なら、`_config_init` が `Note:` 行で以降も `-c` が要る旨を案内する |
+| `_cmd_config` | `--init` / `--force` / `--system` / 引数なし（パス表示）。位置引数は受け付けず、渡されたら `_usage` で終了コード 2 とする（既定パスへの意図しない作成を防ぐため）。`--init` の作成先の決定は `_config_init_target` に切り出してある（テストから直接検証するため）。`--system` は `--init` と併用したときだけ有効で、単独指定は `_usage` で終了コード 2。作成先が `_config_find` の探索候補（`_config_user_path` / `_SYSTEM_CONFIG`）以外なら、`_config_init` が `Note:` 行で以降も `-c` が要る旨を案内する |
 | `_cmd_version` / `_cmd_help` | `_VERSION` の表示、サブコマンド別ヘルプ |
 
 #### `_wait_result <name...> <期待状態> <タイムアウト>`
@@ -729,6 +743,8 @@ _parse_args "$@":
 ```
 
 サブコマンド固有オプション（`--init` / `--force` / `--user` / `--system` / `--run-as` / `--now` / `-f` / `--exit-code`）は、共通パーサで未知として弾かれないよう `_SUBCMD_OPTS` に一旦収集し、各 `_cmd_*` 内で解析する。
+
+main ディスパッチは各サブコマンドの前に `_check_prerequisites` → `_config_setup` → `_setup_runtime_dir` を必要なだけ並べる。ただし `install-service` だけは `_config_setup` をディスパッチで呼ばず `_cmd_install_service` の中で呼ぶ ── どの設定ファイルを前提にするかが `--system` の有無で決まり、それは `_SUBCMD_OPTS` を走査するまで判明しないため。`config` は従来どおり `_config_setup` を通さない。
 
 #### 名前解決
 
@@ -767,6 +783,7 @@ WantedBy=default.target
 ```
 
 - `ExecStart` のパスは `_self_path()` で解決した絶対パスを埋め込む（SPECS 9.1 の `/usr/local/bin/pfwd` は既定の例示）。
+- `_OPT_CONFIG` があるときは `--config <_CONFIG_FILE>` を `daemon` の前に挟む。`--system` は `_OPT_CONFIG` に `_SYSTEM_CONFIG` を代入するため、システム unit では常にこの形になる（`User=` で動くユーザーの個人設定が SPECS 4.1 の探索順で先に当たるのを防ぐ）。
 - `--system` の場合は `/etc/systemd/system/port-forwarder.service` に生成し、`User=<--run-as の値>` と `WantedBy=multi-user.target` を加える。`--run-as` 省略時は root 実行となるため警告を出す。
 - `KillMode=mixed` により、停止時にメインプロセスへ SIGTERM が送られ、自前の `_daemon_shutdown` で子 ssh を確実に終了させられる。
 - `--now` 指定時は `systemctl [--user] daemon-reload` と `enable --now` を実行する。省略時は SPECS 9.1 の通り実行すべきコマンドを表示するに留める。
@@ -904,6 +921,11 @@ _err_no_daemon()      { echo "daemon is not running. Run 'pfwd up' to start it."
 _err_no_entry()       { echo "no such entry '$1'"; }
 _err_config_is_dir()  { echo "$1 is a directory. Specify the config file itself (e.g. $1/config.yaml)"; }
 _err_config_no_args() { echo "'config' takes no arguments. Use 'pfwd --config <PATH> config --init' to choose where the file is created."; }
+_err_system_not_linux(){ echo "--system is for Linux (systemd) only (uname: $1). Drop --system, or use 'pfwd --config <PATH> config --init' to choose the path."; }
+_err_system_needs_init(){ echo "'--system' requires '--init'. Use 'pfwd config' to show the path in use."; }
+_err_no_system_config(){ echo "system config file not found: $1. Run 'sudo pfwd config --init --system' to create it."; }
+_err_config_not_writable(){ echo "cannot write the config file: $1. Creating a file there needs write permission; rerun with sudo."; }
+_err_config_mkdir()   { echo "cannot create the directory: $1. Creating it there needs write permission; rerun with sudo."; }
 ```
 
 ### 7.4 ssh 失敗理由の分類
